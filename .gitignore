@@ -1,0 +1,22 @@
+# API keys — never commit
+config.env
+
+# Virtual environment
+.venv/
+
+# macOS
+.DS_Store
+
+# Episode output folders (audio files are too large for git)
+*/chunks/
+*_full.wav
+*.mp3
+*.wav
+*.m4a
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude
+.claude/
