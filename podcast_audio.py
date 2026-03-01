@@ -168,12 +168,16 @@ def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks):
           f"({word_count} words)...", end=" ", flush=True)
 
     try:
-        # Prepend a voice direction prompt to ensure consistent voice
-        # across all chunks — without this, Gemini can drift between chunks
+        # Strong voice direction prompt to lock down consistency across chunks.
+        # Specifies exact speaking rate, forbids variation, and anchors the style.
         voice_prompt = (
-            f"Read the following text in a steady, consistent podcast host voice. "
-            f"Maintain the same tone, pace, and vocal quality throughout. "
-            f"Speak naturally as a professional podcast narrator:\n\n"
+            f"You are narrating a podcast. Use the following strict rules:\n"
+            f"- Speak at exactly 150 words per minute. Do not speed up or slow down.\n"
+            f"- Use a calm, measured, professional tone throughout.\n"
+            f"- Do not add dramatic pauses, excitement, or emphasis changes.\n"
+            f"- Do not whisper or raise your voice.\n"
+            f"- Maintain identical pacing from the first word to the last.\n"
+            f"- This is one continuous narration. Read it evenly and steadily.\n\n"
         )
         prompted_text = voice_prompt + text
 
@@ -251,8 +255,57 @@ def check_ffmpeg():
         sys.exit(1)
 
 
-def concatenate_wavs(chunks_dir, output_wav):
-    """Concatenate all chunk WAV files into a single WAV using ffmpeg."""
+def get_chunk_wpm(wav_path, word_count):
+    """Calculate words-per-minute for a chunk to detect speed anomalies."""
+    duration = get_audio_duration(wav_path)
+    if duration > 0 and word_count > 0:
+        return (word_count / duration) * 60
+    return 150.0  # default assumption
+
+
+def normalize_chunk(wav_path, target_wpm=150.0, word_count=0):
+    """
+    Normalize a chunk's tempo if its WPM deviates too far from target.
+    Also applies loudness normalization. Overwrites the file in place.
+    """
+    actual_wpm = get_chunk_wpm(wav_path, word_count)
+
+    # If WPM deviates by more than 15%, adjust tempo
+    ratio = actual_wpm / target_wpm
+    needs_tempo_fix = abs(ratio - 1.0) > 0.15
+
+    normalized_path = wav_path.parent / f"{wav_path.stem}_norm.wav"
+
+    filters = []
+    if needs_tempo_fix:
+        # atempo adjusts speed without changing pitch (range 0.5–2.0)
+        tempo = max(0.5, min(2.0, ratio))
+        filters.append(f"atempo={tempo:.3f}")
+        print(f"    Chunk {wav_path.stem}: {actual_wpm:.0f} WPM -> adjusting tempo x{tempo:.2f}")
+
+    # Always apply loudness normalization (EBU R128, podcast standard -16 LUFS)
+    filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(wav_path),
+        "-af", ",".join(filters),
+        str(normalized_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        # Replace original with normalized version
+        normalized_path.replace(wav_path)
+    else:
+        # If normalization fails, just continue with original
+        if normalized_path.exists():
+            normalized_path.unlink()
+
+
+def concatenate_wavs(chunks_dir, output_wav, chunk_word_counts=None):
+    """Concatenate all chunk WAV files into a single WAV using ffmpeg.
+    Normalizes tempo and loudness across chunks before concatenating."""
     wav_files = sorted(
         chunks_dir.glob("chunk_*.wav"),
         key=lambda f: int(re.search(r'(\d+)', f.stem).group()),
@@ -260,6 +313,15 @@ def concatenate_wavs(chunks_dir, output_wav):
 
     if not wav_files:
         raise RuntimeError("No WAV chunks found to concatenate")
+
+    # Normalize each chunk for consistent tempo and loudness
+    if chunk_word_counts:
+        print("  Normalizing chunks...")
+        for wav_path in wav_files:
+            idx = int(re.search(r'(\d+)', wav_path.stem).group())
+            wc = chunk_word_counts.get(idx, 0)
+            if wc > 0:
+                normalize_chunk(wav_path, target_wpm=150.0, word_count=wc)
 
     # Create concat list file for ffmpeg
     list_file = chunks_dir / "concat_list.txt"
@@ -443,8 +505,10 @@ def main():
     # --- Generate audio chunks ---
     print(f"\nGenerating audio (voice: {args.voice})...")
     failed_chunks = []
+    chunk_word_counts = {}
 
     for idx, chunk_text in chunks:
+        chunk_word_counts[idx] = len(chunk_text.split())
         if idx in completed:
             print(f"  Chunk {idx}/{len(chunks)}: SKIPPED (already exists)")
             continue
@@ -474,7 +538,7 @@ def main():
     full_wav = episode_dir / f"{safe_title}_full.wav"
     final_mp3 = episode_dir / f"{safe_title}.mp3"
 
-    concatenate_wavs(chunks_dir, full_wav)
+    concatenate_wavs(chunks_dir, full_wav, chunk_word_counts=chunk_word_counts)
     encode_mp3(full_wav, final_mp3, title=args.title)
 
     # --- Save metadata ---

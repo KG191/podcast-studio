@@ -317,7 +317,9 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand, gemini_key,
     client = init_client(gemini_key)
 
     # Generate audio for each chunk
+    chunk_word_counts = {}
     for idx, chunk_text in chunks:
+        chunk_word_counts[idx] = len(chunk_text.split())
         if progress_callback:
             progress_callback(idx, len(chunks))
 
@@ -328,12 +330,12 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand, gemini_key,
         if idx < len(chunks):
             time.sleep(8)
 
-    # Concatenate and encode
+    # Concatenate and encode (with tempo + loudness normalization)
     safe_title = sanitize_title(title)
     full_wav = episode_dir / f"{safe_title}_full.wav"
     final_mp3 = episode_dir / f"{safe_title}.mp3"
 
-    concatenate_wavs(chunks_dir, full_wav)
+    concatenate_wavs(chunks_dir, full_wav, chunk_word_counts=chunk_word_counts)
     encode_mp3(full_wav, final_mp3, title=title, podcast_name=podcast_brand)
 
     return final_mp3
