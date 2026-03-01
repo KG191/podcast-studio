@@ -34,7 +34,7 @@ SAMPLE_RATE = 24000       # Gemini outputs 24kHz PCM
 SAMPLE_WIDTH = 2          # 16-bit (2 bytes per sample)
 CHANNELS = 1              # Mono
 
-MAX_WORDS_PER_CHUNK = 650  # ~4.3 min at 150 wpm (safety margin below ~5:27 API cutoff)
+MAX_WORDS_PER_CHUNK = 800  # ~5.3 min at 150 wpm (close to ~5:27 API cutoff, fewer chunks = fewer voice seams)
 DELAY_BETWEEN_CHUNKS = 8   # Seconds between API calls (rate limit safety)
 
 OUTPUT_BITRATE = "128k"
@@ -170,14 +170,19 @@ def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks,
           f"({word_count} words)...", end=" ", flush=True)
 
     # Strong voice direction prompt to lock down consistency across chunks.
+    # Every chunk gets the identical prompt so the TTS model enters the same
+    # vocal state each time — same register, pitch, pace, and energy.
     voice_prompt = (
-        f"You are narrating a podcast. Use the following strict rules:\n"
-        f"- Speak at exactly 150 words per minute. Do not speed up or slow down.\n"
-        f"- Use a calm, measured, professional tone throughout.\n"
-        f"- Do not add dramatic pauses, excitement, or emphasis changes.\n"
-        f"- Do not whisper or raise your voice.\n"
-        f"- Maintain identical pacing from the first word to the last.\n"
-        f"- This is one continuous narration. Read it evenly and steadily.\n\n"
+        "You are narrating a podcast. Follow these strict rules with no exceptions:\n"
+        "- Speak at exactly 150 words per minute. Never speed up or slow down.\n"
+        "- Use a calm, measured, professional tone throughout.\n"
+        "- Maintain the exact same vocal register, pitch, and energy level from "
+        "the first word to the last.\n"
+        "- Do not vary your intonation pattern, emotional expression, or speaking style.\n"
+        "- Do not add dramatic pauses, excitement, emphasis changes, or vocal fry.\n"
+        "- Do not whisper, raise your voice, or change your delivery in any way.\n"
+        "- Keep your voice steady and monotonously consistent. Flat and even.\n"
+        "- This is one continuous narration. Read it like a calm newsreader.\n\n"
     )
     prompted_text = voice_prompt + text
 
@@ -279,49 +284,51 @@ def get_chunk_wpm(wav_path, word_count):
     return 150.0  # default assumption
 
 
-def normalize_chunk(wav_path, target_wpm=150.0, word_count=0):
+def normalize_chunk_tempo(wav_path, target_wpm, word_count):
     """
-    Normalize a chunk's tempo if its WPM deviates too far from target.
-    Also applies loudness normalization. Overwrites the file in place.
+    Normalize a chunk's tempo to match a target WPM.
+    Corrects ANY deviation above 2% (previously 15%).
+    Does NOT apply loudnorm — that's done once on the final audio.
     """
     actual_wpm = get_chunk_wpm(wav_path, word_count)
+    if actual_wpm <= 0 or word_count <= 0:
+        return
 
-    # If WPM deviates by more than 15%, adjust tempo
     ratio = actual_wpm / target_wpm
-    needs_tempo_fix = abs(ratio - 1.0) > 0.15
 
+    # Skip only if extremely close (within 2%)
+    if abs(ratio - 1.0) < 0.02:
+        return
+
+    tempo = max(0.5, min(2.0, ratio))
     normalized_path = wav_path.parent / f"{wav_path.stem}_norm.wav"
-
-    filters = []
-    if needs_tempo_fix:
-        # atempo adjusts speed without changing pitch (range 0.5–2.0)
-        tempo = max(0.5, min(2.0, ratio))
-        filters.append(f"atempo={tempo:.3f}")
-        print(f"    Chunk {wav_path.stem}: {actual_wpm:.0f} WPM -> adjusting tempo x{tempo:.2f}")
-
-    # Always apply loudness normalization (EBU R128, podcast standard -16 LUFS)
-    filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
 
     cmd = [
         "ffmpeg", "-y",
         "-i", str(wav_path),
-        "-af", ",".join(filters),
+        "-af", f"atempo={tempo:.4f}",
+        "-ar", str(SAMPLE_RATE),
+        "-ac", str(CHANNELS),
+        "-sample_fmt", "s16",
         str(normalized_path),
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode == 0:
-        # Replace original with normalized version
         normalized_path.replace(wav_path)
+        print(f"    {wav_path.stem}: {actual_wpm:.0f} -> {target_wpm:.0f} WPM (x{tempo:.3f})")
     else:
-        # If normalization fails, just continue with original
         if normalized_path.exists():
             normalized_path.unlink()
 
 
 def concatenate_wavs(chunks_dir, output_wav, chunk_word_counts=None):
-    """Concatenate all chunk WAV files into a single WAV using ffmpeg.
-    Normalizes tempo and loudness across chunks before concatenating."""
+    """
+    Assemble chunk WAV files into a single WAV with voice consistency fixes:
+      1. Normalize every chunk's tempo to the MEDIAN WPM across all chunks
+      2. Crossfade between chunks (200ms) to smooth transitions
+      3. Final mastering pass: compression + loudnorm on the full audio
+    """
     wav_files = sorted(
         chunks_dir.glob("chunk_*.wav"),
         key=lambda f: int(re.search(r'(\d+)', f.stem).group()),
@@ -330,37 +337,103 @@ def concatenate_wavs(chunks_dir, output_wav, chunk_word_counts=None):
     if not wav_files:
         raise RuntimeError("No WAV chunks found to concatenate")
 
-    # Normalize each chunk for consistent tempo and loudness
+    # --- Step 1: Compute median WPM and normalize all chunks to it ---
     if chunk_word_counts:
-        print("  Normalizing chunks...")
+        wpms = []
         for wav_path in wav_files:
             idx = int(re.search(r'(\d+)', wav_path.stem).group())
             wc = chunk_word_counts.get(idx, 0)
             if wc > 0:
-                normalize_chunk(wav_path, target_wpm=150.0, word_count=wc)
+                wpm = get_chunk_wpm(wav_path, wc)
+                if wpm > 0:
+                    wpms.append(wpm)
 
-    # Create concat list file for ffmpeg
-    list_file = chunks_dir / "concat_list.txt"
-    with open(list_file, "w") as f:
+        if wpms:
+            wpms_sorted = sorted(wpms)
+            median_wpm = wpms_sorted[len(wpms_sorted) // 2]
+            print(f"  Normalizing all chunks to median pace: {median_wpm:.0f} WPM")
+
+            for wav_path in wav_files:
+                idx = int(re.search(r'(\d+)', wav_path.stem).group())
+                wc = chunk_word_counts.get(idx, 0)
+                if wc > 0:
+                    normalize_chunk_tempo(wav_path, median_wpm, wc)
+
+    # --- Step 2: Crossfade concatenation (200ms blend at each boundary) ---
+    crossfade_sec = 0.2
+
+    if len(wav_files) == 1:
+        # Single chunk — just copy
+        shutil.copy2(wav_files[0], output_wav)
+    else:
+        # Build ffmpeg crossfade filter chain
+        inputs = []
         for wav in wav_files:
-            f.write(f"file '{wav.resolve()}'\n")
+            inputs.extend(["-i", str(wav.resolve())])
 
+        filter_parts = []
+        for i in range(len(wav_files) - 1):
+            src = "[0]" if i == 0 else f"[a{i - 1:02d}]"
+            dst = "[out]" if i == len(wav_files) - 2 else f"[a{i:02d}]"
+            filter_parts.append(
+                f"{src}[{i + 1}]acrossfade=d={crossfade_sec}:c1=tri:c2=tri{dst}"
+            )
+
+        cmd = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[out]",
+            "-ar", str(SAMPLE_RATE),
+            "-ac", str(CHANNELS),
+            "-sample_fmt", "s16",
+            str(output_wav),
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            # Fallback to hard concat if crossfade fails (e.g., very short chunks)
+            print(f"  Crossfade failed, falling back to hard concat: {result.stderr[:200]}")
+            list_file = chunks_dir / "concat_list.txt"
+            with open(list_file, "w") as f:
+                for wav in wav_files:
+                    f.write(f"file '{wav.resolve()}'\n")
+            cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_file), "-c", "copy", str(output_wav),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            list_file.unlink()
+            if result.returncode != 0:
+                raise RuntimeError(f"WAV concatenation failed: {result.stderr}")
+
+    print(f"  Assembled {len(wav_files)} chunks with {int(crossfade_sec * 1000)}ms crossfade -> {output_wav.name}")
+
+    # --- Step 3: Final mastering pass (compression + loudnorm on full audio) ---
+    # Light compression evens out volume/energy differences between chunks.
+    # Single-pass loudnorm on the FULL file is more consistent than per-chunk.
+    mastered_path = output_wav.parent / f"{output_wav.stem}_mastered.wav"
+    master_filters = (
+        "acompressor=threshold=-25dB:ratio=3:attack=200:release=1000:makeup=2,"
+        "loudnorm=I=-16:TP=-1.5:LRA=11"
+    )
     cmd = [
         "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
-        str(output_wav),
+        "-i", str(output_wav),
+        "-af", master_filters,
+        "-ar", str(SAMPLE_RATE),
+        "-ac", str(CHANNELS),
+        "-sample_fmt", "s16",
+        str(mastered_path),
     ]
-
     result = subprocess.run(cmd, capture_output=True, text=True)
-    list_file.unlink()
-
-    if result.returncode != 0:
-        raise RuntimeError(f"WAV concatenation failed: {result.stderr}")
-
-    print(f"  Concatenated {len(wav_files)} chunks -> {output_wav.name}")
+    if result.returncode == 0:
+        mastered_path.replace(output_wav)
+        print("  Final mastering pass applied (compression + loudnorm)")
+    else:
+        if mastered_path.exists():
+            mastered_path.unlink()
+        print(f"  Warning: mastering pass failed, using unmastered audio")
 
 
 def encode_mp3(input_wav, output_mp3, title, podcast_name=None):
