@@ -497,19 +497,27 @@ def main():
         st.session_state["voice"] = voice
         st.session_state["episode_title"] = episode_title
 
-        # --- Step 4: Generate Script ---
-        st.header("4. Generate Script")
+        # --- Step 4: Script (Generate, Upload, or Download) ---
+        st.header("4. Podcast Script")
 
-        if st.button("📝 Generate Script", disabled=not selected):
-            if not selected:
-                st.warning("Select at least one story above.")
-            else:
-                with st.spinner("Generating podcast script with ChatGPT..."):
-                    try:
-                        script = generate_script(selected, podcast_brand, keys["OPENAI_API_KEY"])
-                        st.session_state["script"] = script
-                    except Exception as e:
-                        st.error(f"Script generation failed: {e}")
+        script_col1, script_col2 = st.columns(2)
+        with script_col1:
+            if st.button("📝 Generate Script", disabled=not selected):
+                if not selected:
+                    st.warning("Select at least one story above.")
+                else:
+                    with st.spinner("Generating podcast script with ChatGPT..."):
+                        try:
+                            script = generate_script(selected, podcast_brand, keys["OPENAI_API_KEY"])
+                            st.session_state["script"] = script
+                        except Exception as e:
+                            st.error(f"Script generation failed: {e}")
+        with script_col2:
+            uploaded_script = st.file_uploader(
+                "Or upload a script (.txt)", type=["txt"], key="script_uploader"
+            )
+            if uploaded_script is not None:
+                st.session_state["script"] = uploaded_script.read().decode("utf-8")
 
         if "script" in st.session_state:
             script = st.text_area(
@@ -522,147 +530,158 @@ def main():
             word_count = len(script.split())
             st.caption(f"{word_count} words — ~{word_count / 150:.0f} min at normal pace")
 
-            # --- Step 5: Generate Cover Images ---
-            st.header("5. Cover Image")
+            # Download button
+            st.download_button(
+                "⬇ Download Script",
+                data=script,
+                file_name=f"{sanitize_title(episode_title)}_script.txt",
+                mime="text/plain",
+            )
 
-            if st.button("🎨 Generate 3 Cover Options"):
-                with st.spinner("Generating cover images with DALL-E 3..."):
-                    try:
-                        images = generate_cover_images(
-                            st.session_state["episode_title"],
-                            st.session_state["podcast_brand"],
-                            keys["OPENAI_API_KEY"],
-                            script_text=st.session_state.get("script", ""),
-                        )
-                        st.session_state["cover_images"] = images
-                    except Exception as e:
-                        st.error(f"Image generation failed: {e}")
+    # --- Step 5: Cover Image (independent from podcast generation) ---
+    if "script" in st.session_state:
+        st.header("5. Cover Image")
 
+        if st.button("🎨 Generate 3 Cover Options"):
+            with st.spinner("Generating cover images with DALL-E 3..."):
+                try:
+                    images = generate_cover_images(
+                        st.session_state.get("episode_title", "Untitled"),
+                        st.session_state.get("podcast_brand", PODCAST_BRANDS[0]),
+                        keys["OPENAI_API_KEY"],
+                        script_text=st.session_state.get("script", ""),
+                    )
+                    st.session_state["cover_images"] = images
+                except Exception as e:
+                    st.error(f"Image generation failed: {e}")
+
+        if "cover_images" in st.session_state:
+            cols = st.columns(3)
+            for i, img in enumerate(st.session_state["cover_images"]):
+                with cols[i]:
+                    st.image(img, caption=f"Option {i + 1}", use_container_width=True)
+
+            cover_choice = st.radio(
+                "Select cover image",
+                options=[1, 2, 3],
+                horizontal=True,
+                key="cover_choice",
+            )
+            st.session_state["selected_cover"] = cover_choice - 1
+
+    # --- Step 6: Generate Podcast (independent from cover image) ---
+    if "script" in st.session_state:
+        st.header("6. Generate Podcast")
+
+        if st.button("🎙 Generate Podcast Audio"):
+            title = st.session_state.get("episode_title", "Untitled")
+            brand = st.session_state.get("podcast_brand", PODCAST_BRANDS[0])
+            sel_voice = st.session_state.get("voice", "Kore")
+            script_text = st.session_state["script"]
+
+            # Create episode directory
+            safe = sanitize_title(title)
+            episode_dir = BASE_DIR / safe
+            episode_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save script
+            script_path = episode_dir / "script.txt"
+            script_path.write_text(script_text, encoding="utf-8")
+
+            # Save cover image if one was selected
             if "cover_images" in st.session_state:
-                cols = st.columns(3)
-                for i, img in enumerate(st.session_state["cover_images"]):
-                    with cols[i]:
-                        st.image(img, caption=f"Option {i + 1}", use_container_width=True)
+                cover_idx = st.session_state.get("selected_cover", 0)
+                cover_img = st.session_state["cover_images"][cover_idx]
+                cover_path = episode_dir / "cover.png"
+                cover_img.save(str(cover_path), "PNG")
 
-                cover_choice = st.radio(
-                    "Select cover image",
-                    options=[1, 2, 3],
-                    horizontal=True,
-                    key="cover_choice",
+            # Generate audio
+            progress_bar = st.progress(0, text="Generating audio...")
+
+            def update_progress(current, total):
+                progress_bar.progress(
+                    current / total,
+                    text=f"Generating chunk {current}/{total}...",
                 )
-                st.session_state["selected_cover"] = cover_choice - 1
 
-                # --- Step 6: Generate Podcast ---
-                st.header("6. Generate Podcast")
+            try:
+                mp3_path = generate_podcast_audio(
+                    script_text, sel_voice, title, brand,
+                    keys["GEMINI_API_KEY"], episode_dir,
+                    progress_callback=update_progress,
+                )
 
-                if st.button("🎙 Generate Podcast Audio"):
-                    title = st.session_state["episode_title"]
-                    brand = st.session_state["podcast_brand"]
-                    sel_voice = st.session_state["voice"]
-                    script_text = st.session_state["script"]
+                progress_bar.progress(1.0, text="Done!")
 
-                    # Create episode directory
-                    safe = sanitize_title(title)
-                    episode_dir = BASE_DIR / safe
-                    episode_dir.mkdir(parents=True, exist_ok=True)
+                # Save metadata
+                duration = get_audio_duration(mp3_path)
+                minutes = int(duration // 60)
+                seconds = int(duration % 60)
+                metadata = {
+                    "title": title,
+                    "podcast": brand,
+                    "voice": sel_voice,
+                    "duration": f"{minutes}:{seconds:02d}",
+                    "mp3_file": mp3_path.name,
+                    "cover_file": "cover.png" if "cover_images" in st.session_state else None,
+                    "created": datetime.now().isoformat(),
+                }
+                with open(episode_dir / "metadata.json", "w") as f:
+                    json.dump(metadata, f, indent=2)
 
-                    # Save script
-                    script_path = episode_dir / "script.txt"
-                    script_path.write_text(script_text, encoding="utf-8")
+                # Success
+                st.success(f"Podcast generated successfully!")
+                st.markdown(f"""
+                **Episode**: {title}
+                **Duration**: {minutes}:{seconds:02d}
+                **Files saved to**: `{episode_dir}`
+                - `{mp3_path.name}` — upload to RSS.com
+                - `cover.png` — upload as episode artwork
+                - `script.txt` — episode script
+                """)
 
-                    # Save cover image
-                    cover_idx = st.session_state.get("selected_cover", 0)
-                    cover_img = st.session_state["cover_images"][cover_idx]
-                    cover_path = episode_dir / "cover.png"
-                    cover_img.save(str(cover_path), "PNG")
+                # Audio player
+                audio_bytes = mp3_path.read_bytes()
+                st.audio(audio_bytes, format="audio/mp3")
 
-                    # Generate audio
-                    progress_bar = st.progress(0, text="Generating audio...")
-
-                    def update_progress(current, total):
-                        progress_bar.progress(
-                            current / total,
-                            text=f"Generating chunk {current}/{total}...",
-                        )
-
+                # Generate podcast preview summary (max 4000 chars)
+                st.header("7. Podcast Preview Summary")
+                with st.spinner("Generating preview summary..."):
                     try:
-                        mp3_path = generate_podcast_audio(
-                            script_text, sel_voice, title, brand,
-                            keys["GEMINI_API_KEY"], episode_dir,
-                            progress_callback=update_progress,
+                        oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
+                        summary_resp = oai_client.chat.completions.create(
+                            model=OPENAI_MODEL,
+                            messages=[{"role": "user", "content": (
+                                f"Write a compelling podcast episode preview/description "
+                                f"for the following podcast script. The preview should "
+                                f"hook listeners and summarise the key topics covered. "
+                                f"Keep it under 4000 characters.\n\n"
+                                f"Podcast: {brand}\n"
+                                f"Episode: {title}\n\n"
+                                f"{script_text}"
+                            )}],
                         )
+                        summary = summary_resp.choices[0].message.content
+                        # Enforce 4000 char limit
+                        if len(summary) > 4000:
+                            summary = summary[:3997] + "..."
 
-                        progress_bar.progress(1.0, text="Done!")
+                        st.text_area(
+                            "Preview summary (copy for RSS.com episode description)",
+                            value=summary,
+                            height=250,
+                        )
+                        st.caption(f"{len(summary)} / 4000 characters")
 
-                        # Save metadata
-                        duration = get_audio_duration(mp3_path)
-                        minutes = int(duration // 60)
-                        seconds = int(duration % 60)
-                        metadata = {
-                            "title": title,
-                            "podcast": brand,
-                            "voice": sel_voice,
-                            "duration": f"{minutes}:{seconds:02d}",
-                            "mp3_file": mp3_path.name,
-                            "cover_file": "cover.png",
-                            "created": datetime.now().isoformat(),
-                        }
-                        with open(episode_dir / "metadata.json", "w") as f:
-                            json.dump(metadata, f, indent=2)
-
-                        # Success
-                        st.success(f"Podcast generated successfully!")
-                        st.markdown(f"""
-                        **Episode**: {title}
-                        **Duration**: {minutes}:{seconds:02d}
-                        **Files saved to**: `{episode_dir}`
-                        - `{mp3_path.name}` — upload to RSS.com
-                        - `cover.png` — upload as episode artwork
-                        - `script.txt` — episode script
-                        """)
-
-                        # Audio player
-                        audio_bytes = mp3_path.read_bytes()
-                        st.audio(audio_bytes, format="audio/mp3")
-
-                        # Generate podcast preview summary (max 4000 chars)
-                        st.header("7. Podcast Preview Summary")
-                        with st.spinner("Generating preview summary..."):
-                            try:
-                                oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
-                                summary_resp = oai_client.chat.completions.create(
-                                    model=OPENAI_MODEL,
-                                    messages=[{"role": "user", "content": (
-                                        f"Write a compelling podcast episode preview/description "
-                                        f"for the following podcast script. The preview should "
-                                        f"hook listeners and summarise the key topics covered. "
-                                        f"Keep it under 4000 characters.\n\n"
-                                        f"Podcast: {brand}\n"
-                                        f"Episode: {title}\n\n"
-                                        f"{script_text}"
-                                    )}],
-                                )
-                                summary = summary_resp.choices[0].message.content
-                                # Enforce 4000 char limit
-                                if len(summary) > 4000:
-                                    summary = summary[:3997] + "..."
-
-                                st.text_area(
-                                    "Preview summary (copy for RSS.com episode description)",
-                                    value=summary,
-                                    height=250,
-                                )
-                                st.caption(f"{len(summary)} / 4000 characters")
-
-                                # Save to episode folder
-                                summary_path = episode_dir / "preview_summary.txt"
-                                summary_path.write_text(summary, encoding="utf-8")
-                                st.caption(f"Saved to `{summary_path}`")
-                            except Exception as e:
-                                st.error(f"Summary generation failed: {e}")
-
+                        # Save to episode folder
+                        summary_path = episode_dir / "preview_summary.txt"
+                        summary_path.write_text(summary, encoding="utf-8")
+                        st.caption(f"Saved to `{summary_path}`")
                     except Exception as e:
-                        st.error(f"Audio generation failed: {e}")
+                        st.error(f"Summary generation failed: {e}")
+
+            except Exception as e:
+                st.error(f"Audio generation failed: {e}")
 
 
 if __name__ == "__main__":
