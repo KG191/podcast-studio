@@ -156,10 +156,12 @@ def chunk_script(text, max_words=MAX_WORDS_PER_CHUNK):
 # ---------------------------------------------------------------------------
 
 
-def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks):
+def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks,
+                         max_retries=3):
     """
     Call Gemini TTS API for a single text chunk.
     Returns raw PCM bytes (16-bit, 24kHz, mono).
+    Auto-retries on rate limit (429) errors.
     """
     from google.genai import types
 
@@ -167,47 +169,61 @@ def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks):
     print(f"  Generating chunk {chunk_index}/{total_chunks} "
           f"({word_count} words)...", end=" ", flush=True)
 
-    try:
-        # Strong voice direction prompt to lock down consistency across chunks.
-        # Specifies exact speaking rate, forbids variation, and anchors the style.
-        voice_prompt = (
-            f"You are narrating a podcast. Use the following strict rules:\n"
-            f"- Speak at exactly 150 words per minute. Do not speed up or slow down.\n"
-            f"- Use a calm, measured, professional tone throughout.\n"
-            f"- Do not add dramatic pauses, excitement, or emphasis changes.\n"
-            f"- Do not whisper or raise your voice.\n"
-            f"- Maintain identical pacing from the first word to the last.\n"
-            f"- This is one continuous narration. Read it evenly and steadily.\n\n"
-        )
-        prompted_text = voice_prompt + text
+    # Strong voice direction prompt to lock down consistency across chunks.
+    voice_prompt = (
+        f"You are narrating a podcast. Use the following strict rules:\n"
+        f"- Speak at exactly 150 words per minute. Do not speed up or slow down.\n"
+        f"- Use a calm, measured, professional tone throughout.\n"
+        f"- Do not add dramatic pauses, excitement, or emphasis changes.\n"
+        f"- Do not whisper or raise your voice.\n"
+        f"- Maintain identical pacing from the first word to the last.\n"
+        f"- This is one continuous narration. Read it evenly and steadily.\n\n"
+    )
+    prompted_text = voice_prompt + text
 
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompted_text,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=prompted_text,
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=voice_name,
+                            )
                         )
-                    )
+                    ),
                 ),
-            ),
-        )
+            )
 
-        # Extract PCM audio data from response
-        part = response.candidates[0].content.parts[0]
-        pcm_data = part.inline_data.data
+            # Extract PCM audio data from response
+            part = response.candidates[0].content.parts[0]
+            pcm_data = part.inline_data.data
 
-        duration_sec = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
-        print(f"OK ({duration_sec:.1f}s)")
+            duration_sec = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+            print(f"OK ({duration_sec:.1f}s)")
 
-        return pcm_data
+            return pcm_data
 
-    except Exception as e:
-        print("FAILED")
-        raise RuntimeError(f"Chunk {chunk_index} generation failed: {e}")
+        except Exception as e:
+            error_str = str(e)
+            # Auto-retry on rate limit errors
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                # Extract retry delay from error if available
+                import re as _re
+                delay_match = _re.search(r'retry\s*(?:in|Delay["\s:]*)\s*(\d+)', error_str, _re.IGNORECASE)
+                wait_secs = int(delay_match.group(1)) + 5 if delay_match else 45
+
+                if attempt < max_retries:
+                    print(f"RATE LIMITED (waiting {wait_secs}s, attempt {attempt}/{max_retries})")
+                    time.sleep(wait_secs)
+                    print(f"  Retrying chunk {chunk_index}/{total_chunks}...", end=" ", flush=True)
+                    continue
+
+            print("FAILED")
+            raise RuntimeError(f"Chunk {chunk_index} generation failed: {e}")
 
 
 # ---------------------------------------------------------------------------
