@@ -46,7 +46,23 @@ GEMINI_VOICES = [
     "Zubenelgenubi",
 ]
 
-# --- OpenAI TTS (primary engine) ---
+# --- ElevenLabs TTS (primary engine — full episodes, no chunking) ---
+ELEVENLABS_MODEL = "eleven_turbo_v2_5"  # 40,000 char limit = full episode in one call
+ELEVENLABS_MAX_CHARS = 39000            # Safety margin below 40,000 API limit
+# Premade voices: name -> voice_id
+ELEVENLABS_VOICES = {
+    "Archer": "L0Dsvb3SLTyegXwtm47J",     # Friendly young British male, podcasts
+    "Rachel": "21m00Tcm4TlvDq8ikWAM",     # Calm American female, narration
+    "George": "JBFqnCBsd6RMkjVDRZzb",     # Deep British male, narration
+    "Adam": "pNInz6obpgDQGcFmaJgB",       # Deep American male, narration
+    "Antoni": "ErXwobaYiN019PkySvjV",     # Well-rounded American male
+    "Bella": "EXAVITQu4vr4xnSDxMaL",      # Expressive American female
+    "Josh": "TxGEqnHWrfWFTfGW9XjX",       # Deep American male
+    "Domi": "AZnzlk1XvdvUeBnXmlld",       # Strong American female
+    "Elli": "MF3mGyEYCl7XYWbV9V6O",       # Young American female
+}
+
+# --- OpenAI TTS (short clips <5 min) ---
 OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 OPENAI_MAX_CHARS = 3800   # Safety margin below 4096 API hard limit
 OPENAI_VOICES = [
@@ -362,6 +378,142 @@ def generate_chunk_audio_openai(text, voice_name, chunk_index, total_chunks,
 
             print("FAILED")
             raise RuntimeError(f"Chunk {chunk_index} generation failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs TTS Audio Generation (primary — full episodes, no chunking)
+# ---------------------------------------------------------------------------
+
+
+def generate_audio_elevenlabs(text, voice_name, api_key, output_mp3,
+                              max_retries=3):
+    """
+    Generate audio using ElevenLabs TTS.
+
+    Uses eleven_turbo_v2_5 which handles up to 40,000 characters per call —
+    a full 15-20 min podcast episode in ONE call with zero chunking.
+    For scripts exceeding 40K chars, automatically chunks with voice
+    continuity via previous_request_ids.
+
+    Returns path to the output MP3 file.
+    """
+    from elevenlabs.client import ElevenLabs
+    from elevenlabs import VoiceSettings
+
+    client = ElevenLabs(api_key=api_key)
+
+    # Resolve voice name to ID
+    voice_id = ELEVENLABS_VOICES.get(voice_name, voice_name)
+
+    voice_settings = VoiceSettings(
+        stability=0.72,           # High consistency — steady podcast narration
+        similarity_boost=0.85,    # Close to original voice
+        style=0.0,                # Neutral — no exaggerated expression
+        use_speaker_boost=True,   # Enhanced clarity
+        speed=1.0,                # Normal pace
+    )
+
+    char_count = len(text)
+    word_count = len(text.split())
+
+    if char_count <= ELEVENLABS_MAX_CHARS:
+        # --- Single-call generation (the main advantage) ---
+        print(f"  Generating full audio in one call "
+              f"({word_count} words, {char_count} chars)...", end=" ", flush=True)
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                audio_gen = client.text_to_speech.convert(
+                    text=text,
+                    voice_id=voice_id,
+                    model_id=ELEVENLABS_MODEL,
+                    output_format="mp3_44100_128",
+                    voice_settings=voice_settings,
+                )
+                audio_bytes = b"".join(audio_gen)
+                Path(output_mp3).write_bytes(audio_bytes)
+
+                duration = get_audio_duration(output_mp3)
+                size_mb = len(audio_bytes) / (1024 * 1024)
+                print(f"OK ({duration:.1f}s, {size_mb:.1f} MB)")
+                return output_mp3
+
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate" in error_str.lower() or "quota" in error_str.lower():
+                    wait_secs = 30
+                    if attempt < max_retries:
+                        print(f"RATE LIMITED (waiting {wait_secs}s, attempt {attempt}/{max_retries})")
+                        time.sleep(wait_secs)
+                        continue
+                print("FAILED")
+                raise RuntimeError(f"ElevenLabs generation failed: {e}")
+    else:
+        # --- Multi-call with voice continuity (rare — scripts over 40K chars) ---
+        print(f"  Script is {char_count} chars — splitting into chunks...")
+        chunks = _split_text_elevenlabs(text, ELEVENLABS_MAX_CHARS)
+        all_audio = b""
+
+        for i, chunk in enumerate(chunks):
+            print(f"  Generating chunk {i + 1}/{len(chunks)} "
+                  f"({len(chunk)} chars)...", end=" ", flush=True)
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    kwargs = {}
+                    # Pass next chunk preview for prosody continuity
+                    if i + 1 < len(chunks):
+                        kwargs["next_text"] = chunks[i + 1][:200]
+
+                    audio_gen = client.text_to_speech.convert(
+                        text=chunk,
+                        voice_id=voice_id,
+                        model_id=ELEVENLABS_MODEL,
+                        output_format="mp3_44100_128",
+                        voice_settings=voice_settings,
+                        **kwargs,
+                    )
+                    chunk_audio = b"".join(audio_gen)
+                    all_audio += chunk_audio
+                    print(f"OK ({len(chunk_audio) / 1024:.0f} KB)")
+                    break
+
+                except Exception as e:
+                    error_str = str(e)
+                    if ("429" in error_str or "rate" in error_str.lower()) and attempt < max_retries:
+                        print(f"RATE LIMITED (waiting 30s, attempt {attempt}/{max_retries})")
+                        time.sleep(30)
+                        continue
+                    print("FAILED")
+                    raise RuntimeError(f"ElevenLabs chunk {i + 1} failed: {e}")
+
+            if i < len(chunks) - 1:
+                time.sleep(1)
+
+        Path(output_mp3).write_bytes(all_audio)
+        duration = get_audio_duration(output_mp3)
+        size_mb = len(all_audio) / (1024 * 1024)
+        print(f"  Assembled {len(chunks)} chunks -> {Path(output_mp3).name} "
+              f"({duration:.1f}s, {size_mb:.1f} MB)")
+        return output_mp3
+
+
+def _split_text_elevenlabs(text, max_chars):
+    """Split text at sentence boundaries for ElevenLabs chunking."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks = []
+    current = ""
+
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 > max_chars and current:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = (current + " " + sentence).strip() if current else sentence
+
+    if current:
+        chunks.append(current.strip())
+    return chunks
 
 
 # ---------------------------------------------------------------------------

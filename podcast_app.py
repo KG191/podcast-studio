@@ -21,6 +21,7 @@ from PIL import Image
 
 # Import TTS pipeline from existing script
 from podcast_audio import (
+    ELEVENLABS_VOICES,
     GEMINI_VOICES,
     OPENAI_VOICES,
     OPENAI_MAX_CHARS,
@@ -29,6 +30,7 @@ from podcast_audio import (
     chunk_script_by_chars,
     concatenate_wavs,
     encode_mp3,
+    generate_audio_elevenlabs,
     generate_chunk_audio,
     generate_chunk_audio_openai,
     get_audio_duration,
@@ -37,7 +39,24 @@ from podcast_audio import (
     save_wav,
 )
 
-TTS_ENGINES = ["OpenAI TTS (Recommended)", "Gemini TTS (Free)"]
+TTS_ENGINES = [
+    "ElevenLabs (Recommended)",
+    "OpenAI TTS (<5 min clips)",
+    "Gemini TTS (Free, <5 min clips)",
+]
+
+# ElevenLabs voice display names with descriptions
+ELEVENLABS_VOICE_LABELS = [
+    "Archer — Friendly young British male, podcasts",
+    "Rachel — Calm American female, narration",
+    "George — Deep British male, narration",
+    "Adam — Deep American male, narration",
+    "Antoni — Well-rounded American male",
+    "Bella — Expressive American female",
+    "Josh — Deep American male",
+    "Domi — Strong American female",
+    "Elli — Young American female",
+]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -73,7 +92,7 @@ def load_keys():
                 k, v = line.split("=", 1)
                 keys[k.strip()] = v.strip().strip('"').strip("'")
     # Environment variables override file
-    for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "GNEWS_API_KEY"):
+    for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "GNEWS_API_KEY", "ELEVENLABS_API_KEY"):
         env_val = os.environ.get(var)
         if env_val:
             keys[var] = env_val
@@ -347,28 +366,43 @@ def generate_cover_images(title, podcast_brand, api_key, script_text="", count=3
 
 def generate_podcast_audio(script_text, voice, title, podcast_brand,
                            episode_dir, progress_callback=None,
-                           tts_engine="openai", openai_key=None,
-                           gemini_key=None):
+                           tts_engine="elevenlabs", openai_key=None,
+                           gemini_key=None, elevenlabs_key=None):
     """
-    Full TTS pipeline: chunk -> generate -> concatenate -> encode MP3.
-    Supports both OpenAI TTS (primary) and Gemini TTS engines.
+    Full TTS pipeline. Supports three engines:
+      - ElevenLabs (default): single-call for full episodes, no chunking needed
+      - OpenAI TTS: chunked at 4K chars, for short clips
+      - Gemini TTS: chunked by word count, free tier
     Returns path to final MP3.
     """
     check_ffmpeg()
+    safe_title = sanitize_title(title)
 
+    if tts_engine == "elevenlabs":
+        # --- ElevenLabs: generates MP3 directly (single call, no chunking) ---
+        if progress_callback:
+            progress_callback(1, 1)
+
+        final_mp3 = episode_dir / f"{safe_title}.mp3"
+        generate_audio_elevenlabs(
+            script_text, voice, elevenlabs_key, final_mp3,
+        )
+
+        if progress_callback:
+            progress_callback(1, 1)
+        return final_mp3
+
+    # --- OpenAI / Gemini: chunk-based pipeline ---
     chunks_dir = episode_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     use_openai = tts_engine == "openai"
 
     if use_openai:
-        # OpenAI TTS: chunk by character limit (4096 char API limit)
         chunks = chunk_script_by_chars(script_text)
     else:
-        # Gemini TTS: chunk by word count
         chunks = chunk_script(script_text)
 
-    # Generate audio for each chunk
     chunk_word_counts = {}
     for idx, chunk_text in chunks:
         chunk_word_counts[idx] = len(chunk_text.split())
@@ -386,13 +420,10 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand,
             pcm_data = generate_chunk_audio(client, chunk_text, voice, idx, len(chunks))
             save_wav(pcm_data, chunks_dir / f"chunk_{idx:03d}.wav")
 
-        # Rate limit delay between chunks
         if idx < len(chunks):
             delay = 2 if use_openai else 8
             time.sleep(delay)
 
-    # Concatenate and encode (with crossfade + mastering)
-    safe_title = sanitize_title(title)
     full_wav = episode_dir / f"{safe_title}_full.wav"
     final_mp3 = episode_dir / f"{safe_title}.mp3"
 
@@ -418,13 +449,17 @@ def main():
         missing.append("GNEWS_API_KEY")
     if not keys.get("OPENAI_API_KEY"):
         missing.append("OPENAI_API_KEY")
-    if not keys.get("GEMINI_API_KEY"):
-        missing.append("GEMINI_API_KEY")
 
     if missing:
         st.error(f"Missing API key(s) in config.env: {', '.join(missing)}")
         st.info("Add them to config.env in the project folder, then refresh.")
         st.stop()
+
+    if not keys.get("ELEVENLABS_API_KEY"):
+        st.warning("ELEVENLABS_API_KEY not found in config.env — ElevenLabs TTS will be unavailable. "
+                    "Get a key at https://elevenlabs.io/")
+    if not keys.get("GEMINI_API_KEY"):
+        st.info("GEMINI_API_KEY not set — Gemini TTS will be unavailable.")
 
     # --- Step 1: Search News ---
     st.header("1. Find Stories")
@@ -473,14 +508,18 @@ def main():
             podcast_brand = st.selectbox("Podcast Brand", PODCAST_BRANDS)
             tts_engine = st.selectbox("TTS Engine", TTS_ENGINES)
         with col2:
+            is_elevenlabs = tts_engine.startswith("ElevenLabs")
             is_openai_tts = tts_engine.startswith("OpenAI")
-            voice_list = OPENAI_VOICES if is_openai_tts else GEMINI_VOICES
-            default_voice = "nova" if is_openai_tts else "Kore"
-            voice = st.selectbox(
-                "TTS Voice",
-                voice_list,
-                index=voice_list.index(default_voice),
-            )
+
+            if is_elevenlabs:
+                voice_label = st.selectbox("TTS Voice", ELEVENLABS_VOICE_LABELS)
+                voice = voice_label.split(" — ")[0]  # Extract name from "Name — Description"
+            elif is_openai_tts:
+                voice = st.selectbox("TTS Voice", OPENAI_VOICES,
+                                     index=OPENAI_VOICES.index("nova"))
+            else:
+                voice = st.selectbox("TTS Voice", GEMINI_VOICES,
+                                     index=GEMINI_VOICES.index("Kore"))
             preview_clicked = st.button("🔊 Preview Voice (5 sec)")
 
         # Voice preview
@@ -491,7 +530,25 @@ def main():
                     "in artificial intelligence and what they mean for humanity."
                 )
                 try:
-                    if is_openai_tts:
+                    if is_elevenlabs:
+                        # ElevenLabs preview
+                        from elevenlabs.client import ElevenLabs as ELClient
+                        from elevenlabs import VoiceSettings
+                        el_client = ELClient(api_key=keys["ELEVENLABS_API_KEY"])
+                        voice_id = ELEVENLABS_VOICES.get(voice, voice)
+                        audio_gen = el_client.text_to_speech.convert(
+                            text=preview_text,
+                            voice_id=voice_id,
+                            model_id="eleven_turbo_v2_5",
+                            output_format="mp3_44100_128",
+                            voice_settings=VoiceSettings(
+                                stability=0.72, similarity_boost=0.85,
+                                style=0.0, speed=1.0,
+                            ),
+                        )
+                        audio_bytes = b"".join(audio_gen)
+                        st.audio(audio_bytes, format="audio/mp3")
+                    elif is_openai_tts:
                         # OpenAI TTS preview
                         oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
                         response = oai_client.audio.speech.create(
@@ -618,14 +675,23 @@ def main():
 
         # Determine engine
         engine_selection = st.session_state.get("tts_engine", TTS_ENGINES[0])
+        is_elevenlabs = engine_selection.startswith("ElevenLabs")
         is_openai = engine_selection.startswith("OpenAI")
-        engine_label = "OpenAI TTS" if is_openai else "Gemini TTS"
-        st.caption(f"Engine: **{engine_label}** | Voice: **{st.session_state.get('voice', 'nova')}**")
+        if is_elevenlabs:
+            engine_label = "ElevenLabs"
+            engine_key = "elevenlabs"
+        elif is_openai:
+            engine_label = "OpenAI TTS"
+            engine_key = "openai"
+        else:
+            engine_label = "Gemini TTS"
+            engine_key = "gemini"
+        st.caption(f"Engine: **{engine_label}** | Voice: **{st.session_state.get('voice', 'Archer')}**")
 
         if st.button("🎙 Generate Podcast Audio"):
             title = st.session_state.get("episode_title", "Untitled")
             brand = st.session_state.get("podcast_brand", PODCAST_BRANDS[0])
-            sel_voice = st.session_state.get("voice", "nova" if is_openai else "Kore")
+            sel_voice = st.session_state.get("voice", "Archer")
             script_text = st.session_state["script"]
 
             # Create episode directory
@@ -645,12 +711,15 @@ def main():
                 cover_img.save(str(cover_path), "PNG")
 
             # Generate audio
-            progress_bar = st.progress(0, text=f"Generating audio with {engine_label}...")
+            progress_text = ("Generating full episode audio..." if is_elevenlabs
+                             else f"Generating audio with {engine_label}...")
+            progress_bar = st.progress(0, text=progress_text)
 
             def update_progress(current, total):
                 progress_bar.progress(
                     current / total,
-                    text=f"Generating chunk {current}/{total}...",
+                    text=(f"Generating audio..." if total == 1
+                          else f"Generating chunk {current}/{total}..."),
                 )
 
             try:
@@ -658,9 +727,10 @@ def main():
                     script_text, sel_voice, title, brand,
                     episode_dir,
                     progress_callback=update_progress,
-                    tts_engine="openai" if is_openai else "gemini",
-                    openai_key=keys["OPENAI_API_KEY"] if is_openai else None,
-                    gemini_key=keys["GEMINI_API_KEY"] if not is_openai else None,
+                    tts_engine=engine_key,
+                    openai_key=keys.get("OPENAI_API_KEY") if is_openai else None,
+                    gemini_key=keys.get("GEMINI_API_KEY") if engine_key == "gemini" else None,
+                    elevenlabs_key=keys.get("ELEVENLABS_API_KEY") if is_elevenlabs else None,
                 )
 
                 progress_bar.progress(1.0, text="Done!")
