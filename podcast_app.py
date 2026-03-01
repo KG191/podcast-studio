@@ -165,15 +165,38 @@ INTRO_OUTRO = {
     },
     "The Calm Edge": {
         "intro": (
-            "Welcome to The Calm Edge — where we slow down to think clearly about "
-            "a world that's speeding up. I'm your host, and in each episode we take "
-            "a step back from the headlines to explore the ideas shaping our future "
-            "with nuance, depth, and a steady hand."
+            "I'm Wendy — a performance coach for ambitious professionals navigating "
+            "pressure, politics, and high-stakes decisions.\n\n"
+            "This is The Calm Edge — where we think clearly, act deliberately, and "
+            "remain composed when it matters most.\n\n"
+            "And if you're looking for direct, strategic guidance tailored to your "
+            "situation, you'll find it inside the Wendy Performance Coach app on the App Store."
         ),
         "outro": (
-            "Thank you for spending this time with me on The Calm Edge. If you found "
-            "value in today's episode, please subscribe and share it with someone who "
-            "could use a moment of clarity. Until next time — stay calm, stay curious."
+            "This has been The Calm Edge.\n\n"
+            "When pressure rises, composure is a decision.\n\n"
+            "For deeper, situation-specific guidance, the Wendy Performance Coach app "
+            "is available on the App Store.\n\n"
+            "Until next time — stay steady."
+        ),
+        "rules": (
+            "THE CALM EDGE — MANDATORY EPISODE RULES:\n"
+            "- Identity: Every episode must reinforce composure under pressure, strategic "
+            "thinking over emotional reaction, psychological depth, executive restraint, "
+            "and deliberate action.\n"
+            "- AVOID: motivation tone, therapy tone, productivity culture, hustle language, "
+            "inspirational energy. Never use: crush it, level up, dominate, hack, explosive growth.\n"
+            "- ENCOURAGE language: composure, deliberate, strategic, positioning, signal, "
+            "leverage, controlled response.\n"
+            "- Episode structure: The Situation → The Psychological Pattern → "
+            "The Strategic Reframe → The Calm Move (one action only).\n"
+            "- Tone: Measured, analytical, slightly detached, emotionally regulated. "
+            "Never excited, aggressive, casual, or hype-driven.\n"
+            "- The Wendy Performance Coach app is mentioned ONLY in the intro and outro. "
+            "Never mid-episode. Never urgently.\n"
+            "- Episode length: 8-14 minutes. No filler.\n"
+            "- Each episode must answer: What is truly happening psychologically?\n"
+            "- Final test: Does the episode leave the listener more composed? If not, revise."
         ),
     },
     "Think, Expand, Grow, Thrive": {
@@ -194,7 +217,7 @@ INTRO_OUTRO = {
 
 
 def generate_script(article_urls, podcast_brand, api_key):
-    """Generate a 20-min podcast script from selected article URLs."""
+    """Generate a podcast script from selected article URLs."""
     client = OpenAI(api_key=api_key)
 
     # Fetch actual article content so ChatGPT doesn't have to guess
@@ -211,9 +234,25 @@ def generate_script(article_urls, podcast_brand, api_key):
     brand_intros = INTRO_OUTRO.get(podcast_brand, {})
     intro_text = brand_intros.get("intro", "")
     outro_text = brand_intros.get("outro", "")
+    brand_rules = brand_intros.get("rules", "")
+
+    # Adjust length target per brand
+    if brand_rules:
+        # The Calm Edge: 8-14 min → ~1200-2100 words
+        length_instruction = "Aim for approximately 1200-2100 words (8-14 minutes at speaking pace)."
+    else:
+        # Default brands: 20 min → ~3000-3500 words
+        length_instruction = "Aim for approximately 3000-3500 words (20 minutes at speaking pace)."
+
+    # Build brand-specific rules section
+    brand_rules_block = ""
+    if brand_rules:
+        brand_rules_block = (
+            f"\n\nBRAND-SPECIFIC RULES — FOLLOW THESE EXACTLY:\n{brand_rules}\n"
+        )
 
     prompt = (
-        f"You are a professional podcast scriptwriter. Generate a 20-minute single-host "
+        f"You are a professional podcast scriptwriter. Generate a single-host "
         f"podcast script based on the article content provided below.\n\n"
         f"STRICT RULES:\n"
         f"- Output ONLY the script. No preamble, no commentary, no notes, no disclaimers.\n"
@@ -225,7 +264,8 @@ def generate_script(article_urls, podcast_brand, api_key):
         f"- Between the intro and outro, deliver insightful, well-structured commentary "
         f"on the article content. Analyse the implications, provide context, and engage "
         f"the listener as a knowledgeable, articulate host.\n"
-        f"- Aim for approximately 3000-3500 words (20 minutes at speaking pace).\n\n"
+        f"- {length_instruction}\n"
+        f"{brand_rules_block}\n"
         f"ARTICLE CONTENT:\n\n{all_articles}"
     )
 
