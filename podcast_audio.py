@@ -29,19 +29,15 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "gemini-2.5-flash-preview-tts"
+# --- Gemini TTS ---
+GEMINI_MODEL_ID = "gemini-2.5-flash-preview-tts"
 SAMPLE_RATE = 24000       # Gemini outputs 24kHz PCM
 SAMPLE_WIDTH = 2          # 16-bit (2 bytes per sample)
 CHANNELS = 1              # Mono
+GEMINI_MAX_WORDS = 800    # ~5.3 min at 150 wpm (safety margin below ~5:27 API cutoff)
+GEMINI_DELAY = 8          # Seconds between API calls (rate limit safety)
 
-MAX_WORDS_PER_CHUNK = 800  # ~5.3 min at 150 wpm (close to ~5:27 API cutoff, fewer chunks = fewer voice seams)
-DELAY_BETWEEN_CHUNKS = 8   # Seconds between API calls (rate limit safety)
-
-OUTPUT_BITRATE = "128k"
-OUTPUT_SAMPLE_RATE = 44100
-PODCAST_NAME = "AI to AGI to ASI"
-
-VOICES = [
+GEMINI_VOICES = [
     "Achernar", "Achird", "Algenib", "Algieba", "Alnilam", "Aoede",
     "Autonoe", "Callirrhoe", "Charon", "Despina", "Enceladus", "Erinome",
     "Fenrir", "Gacrux", "Iapetus", "Kore", "Laomedeia", "Leda", "Orus",
@@ -49,6 +45,25 @@ VOICES = [
     "Schedar", "Sulafat", "Umbriel", "Vindemiatrix", "Zephyr",
     "Zubenelgenubi",
 ]
+
+# --- OpenAI TTS (primary engine) ---
+OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+OPENAI_MAX_CHARS = 3800   # Safety margin below 4096 API hard limit
+OPENAI_VOICES = [
+    "alloy", "ash", "ballad", "cedar", "coral", "echo",
+    "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse",
+]
+
+# --- Shared ---
+# Legacy aliases for backward compatibility
+MODEL_ID = GEMINI_MODEL_ID
+VOICES = GEMINI_VOICES
+MAX_WORDS_PER_CHUNK = GEMINI_MAX_WORDS
+DELAY_BETWEEN_CHUNKS = GEMINI_DELAY
+
+OUTPUT_BITRATE = "128k"
+OUTPUT_SAMPLE_RATE = 44100
+PODCAST_NAME = "AI to AGI to ASI"
 
 # ---------------------------------------------------------------------------
 # API Key Loading
@@ -221,6 +236,124 @@ def generate_chunk_audio(client, text, voice_name, chunk_index, total_chunks,
                 delay_match = _re.search(r'retry\s*(?:in|Delay["\s:]*)\s*(\d+)', error_str, _re.IGNORECASE)
                 wait_secs = int(delay_match.group(1)) + 5 if delay_match else 45
 
+                if attempt < max_retries:
+                    print(f"RATE LIMITED (waiting {wait_secs}s, attempt {attempt}/{max_retries})")
+                    time.sleep(wait_secs)
+                    print(f"  Retrying chunk {chunk_index}/{total_chunks}...", end=" ", flush=True)
+                    continue
+
+            print("FAILED")
+            raise RuntimeError(f"Chunk {chunk_index} generation failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# OpenAI TTS Audio Generation (primary engine)
+# ---------------------------------------------------------------------------
+
+
+def chunk_script_by_chars(text, max_chars=OPENAI_MAX_CHARS):
+    """
+    Split script text into chunks by character limit at sentence boundaries.
+    Used for OpenAI TTS which has a 4096-character limit per call.
+    Returns list of (chunk_index, chunk_text) tuples (1-indexed).
+    """
+    paragraphs = re.split(r'\n\s*\n', text.strip())
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+    chunks = []
+    current_chunk = []
+    current_chars = 0
+
+    for para in paragraphs:
+        para_chars = len(para)
+
+        if para_chars > max_chars:
+            # Flush current chunk
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = []
+                current_chars = 0
+
+            # Split oversized paragraph at sentence boundaries
+            sentences = re.split(r'(?<=[.!?])\s+', para)
+            sent_chunk = []
+            sent_chars = 0
+            for sentence in sentences:
+                s_chars = len(sentence)
+                if sent_chars + s_chars + 1 > max_chars and sent_chunk:
+                    chunks.append(" ".join(sent_chunk))
+                    sent_chunk = []
+                    sent_chars = 0
+                sent_chunk.append(sentence)
+                sent_chars += s_chars + 1
+            if sent_chunk:
+                chunks.append(" ".join(sent_chunk))
+
+        elif current_chars + para_chars + 2 > max_chars:
+            # Current chunk is full
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = [para]
+            current_chars = para_chars
+
+        else:
+            current_chunk.append(para)
+            current_chars += para_chars + 2  # +2 for \n\n separator
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+
+    return [(i + 1, chunk) for i, chunk in enumerate(chunks)]
+
+
+def generate_chunk_audio_openai(text, voice_name, chunk_index, total_chunks,
+                                api_key, output_wav, max_retries=3):
+    """
+    Generate audio for a single text chunk using OpenAI TTS.
+    Requests WAV output so it feeds directly into the existing
+    crossfade + mastering pipeline.
+    Returns the output WAV path.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    char_count = len(text)
+    word_count = len(text.split())
+    print(f"  Generating chunk {chunk_index}/{total_chunks} "
+          f"({word_count} words, {char_count} chars)...", end=" ", flush=True)
+
+    # Voice direction via the instructions parameter — keeps delivery
+    # identical across every chunk so there are no audible seams.
+    voice_instructions = (
+        "You are narrating a podcast. Follow these rules strictly: "
+        "Speak at a steady, calm, measured pace — approximately 150 words per minute. "
+        "Maintain the exact same vocal register, pitch, energy, and tone throughout. "
+        "Do not vary your intonation, emotion, or delivery style. "
+        "No dramatic pauses, no excitement, no whispering, no raised voice. "
+        "Read evenly and steadily like a calm, professional newsreader."
+    )
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.audio.speech.create(
+                model=OPENAI_TTS_MODEL,
+                voice=voice_name,
+                input=text,
+                instructions=voice_instructions,
+                response_format="wav",
+                speed=1.0,
+            )
+
+            # Save WAV bytes directly
+            Path(output_wav).write_bytes(response.content)
+
+            duration = get_audio_duration(output_wav)
+            print(f"OK ({duration:.1f}s)")
+            return output_wav
+
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "rate" in error_str.lower():
+                wait_secs = 30
                 if attempt < max_retries:
                     print(f"RATE LIMITED (waiting {wait_secs}s, attempt {attempt}/{max_retries})")
                     time.sleep(wait_secs)

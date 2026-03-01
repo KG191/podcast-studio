@@ -21,17 +21,23 @@ from PIL import Image
 
 # Import TTS pipeline from existing script
 from podcast_audio import (
-    VOICES,
+    GEMINI_VOICES,
+    OPENAI_VOICES,
+    OPENAI_MAX_CHARS,
     check_ffmpeg,
     chunk_script,
+    chunk_script_by_chars,
     concatenate_wavs,
     encode_mp3,
     generate_chunk_audio,
+    generate_chunk_audio_openai,
     get_audio_duration,
     init_client,
     sanitize_title,
     save_wav,
 )
+
+TTS_ENGINES = ["OpenAI TTS (Recommended)", "Gemini TTS (Free)"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -339,10 +345,13 @@ def generate_cover_images(title, podcast_brand, api_key, script_text="", count=3
 # ---------------------------------------------------------------------------
 
 
-def generate_podcast_audio(script_text, voice, title, podcast_brand, gemini_key,
-                           episode_dir, progress_callback=None):
+def generate_podcast_audio(script_text, voice, title, podcast_brand,
+                           episode_dir, progress_callback=None,
+                           tts_engine="openai", openai_key=None,
+                           gemini_key=None):
     """
     Full TTS pipeline: chunk -> generate -> concatenate -> encode MP3.
+    Supports both OpenAI TTS (primary) and Gemini TTS engines.
     Returns path to final MP3.
     """
     check_ffmpeg()
@@ -350,11 +359,14 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand, gemini_key,
     chunks_dir = episode_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    # Chunk the script
-    chunks = chunk_script(script_text)
+    use_openai = tts_engine == "openai"
 
-    # Initialize Gemini client
-    client = init_client(gemini_key)
+    if use_openai:
+        # OpenAI TTS: chunk by character limit (4096 char API limit)
+        chunks = chunk_script_by_chars(script_text)
+    else:
+        # Gemini TTS: chunk by word count
+        chunks = chunk_script(script_text)
 
     # Generate audio for each chunk
     chunk_word_counts = {}
@@ -363,14 +375,23 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand, gemini_key,
         if progress_callback:
             progress_callback(idx, len(chunks))
 
-        pcm_data = generate_chunk_audio(client, chunk_text, voice, idx, len(chunks))
-        save_wav(pcm_data, chunks_dir / f"chunk_{idx:03d}.wav")
+        if use_openai:
+            wav_path = chunks_dir / f"chunk_{idx:03d}.wav"
+            generate_chunk_audio_openai(
+                chunk_text, voice, idx, len(chunks),
+                openai_key, wav_path,
+            )
+        else:
+            client = init_client(gemini_key)
+            pcm_data = generate_chunk_audio(client, chunk_text, voice, idx, len(chunks))
+            save_wav(pcm_data, chunks_dir / f"chunk_{idx:03d}.wav")
 
         # Rate limit delay between chunks
         if idx < len(chunks):
-            time.sleep(8)
+            delay = 2 if use_openai else 8
+            time.sleep(delay)
 
-    # Concatenate and encode (with tempo + loudness normalization)
+    # Concatenate and encode (with crossfade + mastering)
     safe_title = sanitize_title(title)
     full_wav = episode_dir / f"{safe_title}_full.wav"
     final_mp3 = episode_dir / f"{safe_title}.mp3"
@@ -450,44 +471,65 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             podcast_brand = st.selectbox("Podcast Brand", PODCAST_BRANDS)
+            tts_engine = st.selectbox("TTS Engine", TTS_ENGINES)
         with col2:
-            voice = st.selectbox("TTS Voice", VOICES, index=VOICES.index("Kore"))
+            is_openai_tts = tts_engine.startswith("OpenAI")
+            voice_list = OPENAI_VOICES if is_openai_tts else GEMINI_VOICES
+            default_voice = "nova" if is_openai_tts else "Kore"
+            voice = st.selectbox(
+                "TTS Voice",
+                voice_list,
+                index=voice_list.index(default_voice),
+            )
             preview_clicked = st.button("🔊 Preview Voice (5 sec)")
 
         # Voice preview
         if preview_clicked:
             with st.spinner(f"Generating preview for {voice}..."):
+                preview_text = (
+                    "Welcome to the podcast. Today we explore the latest developments "
+                    "in artificial intelligence and what they mean for humanity."
+                )
                 try:
-                    from google.genai import types as genai_types
-                    preview_client = init_client(keys["GEMINI_API_KEY"])
-                    preview_text = (
-                        "Welcome to the podcast. Today we explore the latest developments "
-                        "in artificial intelligence and what they mean for humanity."
-                    )
-                    response = preview_client.models.generate_content(
-                        model="gemini-2.5-flash-preview-tts",
-                        contents=f"Read this in a steady podcast host voice: {preview_text}",
-                        config=genai_types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=genai_types.SpeechConfig(
-                                voice_config=genai_types.VoiceConfig(
-                                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                        voice_name=voice,
+                    if is_openai_tts:
+                        # OpenAI TTS preview
+                        oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
+                        response = oai_client.audio.speech.create(
+                            model="gpt-4o-mini-tts",
+                            voice=voice,
+                            input=preview_text,
+                            instructions="Speak in a steady, calm podcast host voice.",
+                            response_format="wav",
+                            speed=1.0,
+                        )
+                        st.audio(response.content, format="audio/wav")
+                    else:
+                        # Gemini TTS preview
+                        from google.genai import types as genai_types
+                        preview_client = init_client(keys["GEMINI_API_KEY"])
+                        response = preview_client.models.generate_content(
+                            model="gemini-2.5-flash-preview-tts",
+                            contents=f"Read this in a steady podcast host voice: {preview_text}",
+                            config=genai_types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=genai_types.SpeechConfig(
+                                    voice_config=genai_types.VoiceConfig(
+                                        prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
+                                            voice_name=voice,
+                                        )
                                     )
-                                )
+                                ),
                             ),
-                        ),
-                    )
-                    pcm_data = response.candidates[0].content.parts[0].inline_data.data
-                    # Convert PCM to WAV in memory for st.audio
-                    import io as _io, wave as _wave
-                    wav_buf = _io.BytesIO()
-                    with _wave.open(wav_buf, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(24000)
-                        wf.writeframes(pcm_data)
-                    st.audio(wav_buf.getvalue(), format="audio/wav")
+                        )
+                        pcm_data = response.candidates[0].content.parts[0].inline_data.data
+                        import io as _io, wave as _wave
+                        wav_buf = _io.BytesIO()
+                        with _wave.open(wav_buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(24000)
+                            wf.writeframes(pcm_data)
+                        st.audio(wav_buf.getvalue(), format="audio/wav")
                 except Exception as e:
                     st.error(f"Voice preview failed: {e}")
 
@@ -495,6 +537,7 @@ def main():
 
         st.session_state["podcast_brand"] = podcast_brand
         st.session_state["voice"] = voice
+        st.session_state["tts_engine"] = tts_engine
         st.session_state["episode_title"] = episode_title
 
         # --- Step 4: Script (Generate, Upload, or Download) ---
@@ -573,10 +616,16 @@ def main():
     if "script" in st.session_state:
         st.header("6. Generate Podcast")
 
+        # Determine engine
+        engine_selection = st.session_state.get("tts_engine", TTS_ENGINES[0])
+        is_openai = engine_selection.startswith("OpenAI")
+        engine_label = "OpenAI TTS" if is_openai else "Gemini TTS"
+        st.caption(f"Engine: **{engine_label}** | Voice: **{st.session_state.get('voice', 'nova')}**")
+
         if st.button("🎙 Generate Podcast Audio"):
             title = st.session_state.get("episode_title", "Untitled")
             brand = st.session_state.get("podcast_brand", PODCAST_BRANDS[0])
-            sel_voice = st.session_state.get("voice", "Kore")
+            sel_voice = st.session_state.get("voice", "nova" if is_openai else "Kore")
             script_text = st.session_state["script"]
 
             # Create episode directory
@@ -596,7 +645,7 @@ def main():
                 cover_img.save(str(cover_path), "PNG")
 
             # Generate audio
-            progress_bar = st.progress(0, text="Generating audio...")
+            progress_bar = st.progress(0, text=f"Generating audio with {engine_label}...")
 
             def update_progress(current, total):
                 progress_bar.progress(
@@ -607,8 +656,11 @@ def main():
             try:
                 mp3_path = generate_podcast_audio(
                     script_text, sel_voice, title, brand,
-                    keys["GEMINI_API_KEY"], episode_dir,
+                    episode_dir,
                     progress_callback=update_progress,
+                    tts_engine="openai" if is_openai else "gemini",
+                    openai_key=keys["OPENAI_API_KEY"] if is_openai else None,
+                    gemini_key=keys["GEMINI_API_KEY"] if not is_openai else None,
                 )
 
                 progress_bar.progress(1.0, text="Done!")
