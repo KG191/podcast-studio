@@ -440,7 +440,21 @@ def generate_audio_elevenlabs(text, voice_name, api_key, output_mp3,
 
             except Exception as e:
                 error_str = str(e)
-                if "429" in error_str or "rate" in error_str.lower() or "quota" in error_str.lower():
+                # Quota exceeded — give a clear, actionable message
+                if "quota_exceeded" in error_str or "credits remaining" in error_str.lower():
+                    print("QUOTA EXCEEDED")
+                    # Extract remaining/required credits from error if possible
+                    import re as _re
+                    remaining = _re.search(r'(\d+)\s*credits\s*remaining', error_str)
+                    required = _re.search(r'(\d+)\s*credits\s*are\s*required', error_str)
+                    msg = "ElevenLabs quota exceeded."
+                    if remaining and required:
+                        msg += (f" You have {remaining.group(1)} credits remaining "
+                                f"but need {required.group(1)}.")
+                    msg += (" Upgrade your plan at https://elevenlabs.io/pricing "
+                            "or switch to OpenAI TTS / Gemini TTS.")
+                    raise RuntimeError(msg)
+                if "429" in error_str or "rate" in error_str.lower():
                     wait_secs = 30
                     if attempt < max_retries:
                         print(f"RATE LIMITED (waiting {wait_secs}s, attempt {attempt}/{max_retries})")
@@ -480,6 +494,13 @@ def generate_audio_elevenlabs(text, voice_name, api_key, output_mp3,
 
                 except Exception as e:
                     error_str = str(e)
+                    if "quota_exceeded" in error_str or "credits remaining" in error_str.lower():
+                        print("QUOTA EXCEEDED")
+                        raise RuntimeError(
+                            "ElevenLabs quota exceeded. Upgrade at "
+                            "https://elevenlabs.io/pricing or switch to "
+                            "OpenAI TTS / Gemini TTS."
+                        )
                     if ("429" in error_str or "rate" in error_str.lower()) and attempt < max_retries:
                         print(f"RATE LIMITED (waiting 30s, attempt {attempt}/{max_retries})")
                         time.sleep(30)
