@@ -483,11 +483,11 @@ def main():
             except Exception as e:
                 st.error(f"News search failed: {e}")
 
-    # --- Step 2: Display Stories ---
+    # --- Step 2: Display Stories (optional) ---
+    selected = []
     if st.session_state.get("articles"):
         st.header("2. Select Stories")
         articles = st.session_state["articles"]
-        selected = []
 
         for i, article in enumerate(articles):
             checked = st.checkbox(
@@ -501,142 +501,142 @@ def main():
 
         st.session_state["selected_urls"] = selected
 
-        # --- Step 3: Configuration ---
-        st.header("3. Configure Episode")
-        col1, col2 = st.columns(2)
-        with col1:
-            podcast_brand = st.selectbox("Podcast Brand", PODCAST_BRANDS)
-            tts_engine = st.selectbox("TTS Engine", TTS_ENGINES)
-        with col2:
-            is_elevenlabs = tts_engine.startswith("ElevenLabs")
-            is_openai_tts = tts_engine.startswith("OpenAI")
+    # --- Step 3: Configuration (always visible) ---
+    st.header("3. Configure Episode")
+    col1, col2 = st.columns(2)
+    with col1:
+        podcast_brand = st.selectbox("Podcast Brand", PODCAST_BRANDS)
+        tts_engine = st.selectbox("TTS Engine", TTS_ENGINES)
+    with col2:
+        is_elevenlabs = tts_engine.startswith("ElevenLabs")
+        is_openai_tts = tts_engine.startswith("OpenAI")
 
-            if is_elevenlabs:
-                voice_label = st.selectbox("TTS Voice", ELEVENLABS_VOICE_LABELS)
-                voice = voice_label.split(" — ")[0]  # Extract name from "Name — Description"
-            elif is_openai_tts:
-                voice = st.selectbox("TTS Voice", OPENAI_VOICES,
-                                     index=OPENAI_VOICES.index("nova"))
-            else:
-                voice = st.selectbox("TTS Voice", GEMINI_VOICES,
-                                     index=GEMINI_VOICES.index("Kore"))
-            preview_clicked = st.button("🔊 Preview Voice (5 sec)")
+        if is_elevenlabs:
+            voice_label = st.selectbox("TTS Voice", ELEVENLABS_VOICE_LABELS)
+            voice = voice_label.split(" — ")[0]
+        elif is_openai_tts:
+            voice = st.selectbox("TTS Voice", OPENAI_VOICES,
+                                 index=OPENAI_VOICES.index("nova"))
+        else:
+            voice = st.selectbox("TTS Voice", GEMINI_VOICES,
+                                 index=GEMINI_VOICES.index("Kore"))
+        preview_clicked = st.button("🔊 Preview Voice (5 sec)")
 
-        # Voice preview
-        if preview_clicked:
-            with st.spinner(f"Generating preview for {voice}..."):
-                preview_text = (
-                    "Welcome to the podcast. Today we explore the latest developments "
-                    "in artificial intelligence and what they mean for humanity."
-                )
-                try:
-                    if is_elevenlabs:
-                        # ElevenLabs preview
-                        from elevenlabs.client import ElevenLabs as ELClient
-                        from elevenlabs import VoiceSettings
-                        el_client = ELClient(api_key=keys["ELEVENLABS_API_KEY"])
-                        voice_id = ELEVENLABS_VOICES.get(voice, voice)
-                        audio_gen = el_client.text_to_speech.convert(
-                            text=preview_text,
-                            voice_id=voice_id,
-                            model_id="eleven_turbo_v2_5",
-                            output_format="mp3_44100_128",
-                            voice_settings=VoiceSettings(
-                                stability=0.72, similarity_boost=0.85,
-                                style=0.0, speed=1.0,
-                            ),
-                        )
-                        audio_bytes = b"".join(audio_gen)
-                        st.audio(audio_bytes, format="audio/mp3")
-                    elif is_openai_tts:
-                        # OpenAI TTS preview
-                        oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
-                        response = oai_client.audio.speech.create(
-                            model="gpt-4o-mini-tts",
-                            voice=voice,
-                            input=preview_text,
-                            instructions="Speak in a steady, calm podcast host voice.",
-                            response_format="wav",
-                            speed=1.0,
-                        )
-                        st.audio(response.content, format="audio/wav")
-                    else:
-                        # Gemini TTS preview
-                        from google.genai import types as genai_types
-                        preview_client = init_client(keys["GEMINI_API_KEY"])
-                        response = preview_client.models.generate_content(
-                            model="gemini-2.5-flash-preview-tts",
-                            contents=f"Read this in a steady podcast host voice: {preview_text}",
-                            config=genai_types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=genai_types.SpeechConfig(
-                                    voice_config=genai_types.VoiceConfig(
-                                        prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                                            voice_name=voice,
-                                        )
-                                    )
-                                ),
-                            ),
-                        )
-                        pcm_data = response.candidates[0].content.parts[0].inline_data.data
-                        import io as _io, wave as _wave
-                        wav_buf = _io.BytesIO()
-                        with _wave.open(wav_buf, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(24000)
-                            wf.writeframes(pcm_data)
-                        st.audio(wav_buf.getvalue(), format="audio/wav")
-                except Exception as e:
-                    st.error(f"Voice preview failed: {e}")
-
-        episode_title = st.text_input("Episode Title", value=articles[0]["title"] if selected else "")
-
-        st.session_state["podcast_brand"] = podcast_brand
-        st.session_state["voice"] = voice
-        st.session_state["tts_engine"] = tts_engine
-        st.session_state["episode_title"] = episode_title
-
-        # --- Step 4: Script (Generate, Upload, or Download) ---
-        st.header("4. Podcast Script")
-
-        script_col1, script_col2 = st.columns(2)
-        with script_col1:
-            if st.button("📝 Generate Script", disabled=not selected):
-                if not selected:
-                    st.warning("Select at least one story above.")
+    # Voice preview
+    if preview_clicked:
+        with st.spinner(f"Generating preview for {voice}..."):
+            preview_text = (
+                "Welcome to the podcast. Today we explore the latest developments "
+                "in artificial intelligence and what they mean for humanity."
+            )
+            try:
+                if is_elevenlabs:
+                    from elevenlabs.client import ElevenLabs as ELClient
+                    from elevenlabs import VoiceSettings
+                    el_client = ELClient(api_key=keys["ELEVENLABS_API_KEY"])
+                    voice_id = ELEVENLABS_VOICES.get(voice, voice)
+                    audio_gen = el_client.text_to_speech.convert(
+                        text=preview_text,
+                        voice_id=voice_id,
+                        model_id="eleven_turbo_v2_5",
+                        output_format="mp3_44100_128",
+                        voice_settings=VoiceSettings(
+                            stability=0.72, similarity_boost=0.85,
+                            style=0.0, speed=1.0,
+                        ),
+                    )
+                    audio_bytes = b"".join(audio_gen)
+                    st.audio(audio_bytes, format="audio/mp3")
+                elif is_openai_tts:
+                    oai_client = OpenAI(api_key=keys["OPENAI_API_KEY"])
+                    response = oai_client.audio.speech.create(
+                        model="gpt-4o-mini-tts",
+                        voice=voice,
+                        input=preview_text,
+                        instructions="Speak in a steady, calm podcast host voice.",
+                        response_format="wav",
+                        speed=1.0,
+                    )
+                    st.audio(response.content, format="audio/wav")
                 else:
-                    with st.spinner("Generating podcast script with ChatGPT..."):
-                        try:
-                            script = generate_script(selected, podcast_brand, keys["OPENAI_API_KEY"])
-                            st.session_state["script"] = script
-                        except Exception as e:
-                            st.error(f"Script generation failed: {e}")
-        with script_col2:
-            uploaded_script = st.file_uploader(
-                "Or upload a script (.txt)", type=["txt"], key="script_uploader"
-            )
-            if uploaded_script is not None:
-                st.session_state["script"] = uploaded_script.read().decode("utf-8")
+                    from google.genai import types as genai_types
+                    preview_client = init_client(keys["GEMINI_API_KEY"])
+                    response = preview_client.models.generate_content(
+                        model="gemini-2.5-flash-preview-tts",
+                        contents=f"Read this in a steady podcast host voice: {preview_text}",
+                        config=genai_types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=genai_types.SpeechConfig(
+                                voice_config=genai_types.VoiceConfig(
+                                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
+                                        voice_name=voice,
+                                    )
+                                )
+                            ),
+                        ),
+                    )
+                    pcm_data = response.candidates[0].content.parts[0].inline_data.data
+                    import io as _io, wave as _wave
+                    wav_buf = _io.BytesIO()
+                    with _wave.open(wav_buf, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(24000)
+                        wf.writeframes(pcm_data)
+                    st.audio(wav_buf.getvalue(), format="audio/wav")
+            except Exception as e:
+                st.error(f"Voice preview failed: {e}")
 
-        if "script" in st.session_state:
-            script = st.text_area(
-                "Podcast Script (edit if needed)",
-                value=st.session_state["script"],
-                height=400,
-                key="script_editor",
-            )
-            st.session_state["script"] = script
-            word_count = len(script.split())
-            st.caption(f"{word_count} words — ~{word_count / 150:.0f} min at normal pace")
+    # Default episode title from selected article, or empty
+    default_title = ""
+    if selected and st.session_state.get("articles"):
+        default_title = st.session_state["articles"][0]["title"]
+    episode_title = st.text_input("Episode Title", value=default_title)
 
-            # Download button
-            st.download_button(
-                "⬇ Download Script",
-                data=script,
-                file_name=f"{sanitize_title(episode_title)}_script.txt",
-                mime="text/plain",
-            )
+    st.session_state["podcast_brand"] = podcast_brand
+    st.session_state["voice"] = voice
+    st.session_state["tts_engine"] = tts_engine
+    st.session_state["episode_title"] = episode_title
+
+    # --- Step 4: Script (Generate from stories, Upload, or Paste) ---
+    st.header("4. Podcast Script")
+
+    script_col1, script_col2 = st.columns(2)
+    with script_col1:
+        if st.button("📝 Generate Script from Stories", disabled=not selected):
+            with st.spinner("Generating podcast script with ChatGPT..."):
+                try:
+                    script = generate_script(selected, podcast_brand, keys["OPENAI_API_KEY"])
+                    st.session_state["script"] = script
+                except Exception as e:
+                    st.error(f"Script generation failed: {e}")
+        if not selected:
+            st.caption("Search and select stories above, or upload/paste a script.")
+    with script_col2:
+        uploaded_script = st.file_uploader(
+            "Or upload a script (.txt)", type=["txt"], key="script_uploader"
+        )
+        if uploaded_script is not None:
+            st.session_state["script"] = uploaded_script.read().decode("utf-8")
+
+    if "script" in st.session_state:
+        script = st.text_area(
+            "Podcast Script (edit if needed)",
+            value=st.session_state["script"],
+            height=400,
+            key="script_editor",
+        )
+        st.session_state["script"] = script
+        word_count = len(script.split())
+        st.caption(f"{word_count} words — ~{word_count / 150:.0f} min at normal pace")
+
+        # Download button
+        st.download_button(
+            "⬇ Download Script",
+            data=script,
+            file_name=f"{sanitize_title(episode_title)}_script.txt",
+            mime="text/plain",
+        )
 
     # --- Step 5: Cover Image (independent from podcast generation) ---
     if "script" in st.session_state:
