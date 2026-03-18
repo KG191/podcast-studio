@@ -56,7 +56,21 @@ ELEVENLABS_VOICE_LABELS = [
     "Josh — Deep American male",
     "Domi — Strong American female",
     "Elli — Young American female",
+    "Liberty X — The Calm Edge voice",
+    "Beth — The Calm Edge voice",
+    "Emma — The Calm Edge voice",
+    "Serena — The Calm Edge voice",
 ]
+
+# Voices recommended per brand (shown first in the dropdown)
+BRAND_VOICE_LABELS = {
+    "The Calm Edge": [
+        "Liberty X — The Calm Edge voice",
+        "Beth — The Calm Edge voice",
+        "Emma — The Calm Edge voice",
+        "Serena — The Calm Edge voice",
+    ],
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -145,6 +159,30 @@ def search_news(query, api_key, max_results=3):
 # ---------------------------------------------------------------------------
 
 
+def extract_document_text(uploaded_file):
+    """Extract text from an uploaded Word (.docx) or PDF file."""
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
+        try:
+            import PyPDF2
+            reader = PyPDF2.PdfReader(uploaded_file)
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        except ImportError:
+            raise ImportError("PyPDF2 is required for PDF uploads. Run: pip install PyPDF2")
+    elif name.endswith(".docx"):
+        try:
+            import docx
+            doc = docx.Document(uploaded_file)
+            text = "\n".join(p.text for p in doc.paragraphs)
+        except ImportError:
+            raise ImportError("python-docx is required for Word uploads. Run: pip install python-docx")
+    else:
+        raise ValueError(f"Unsupported file type: {name}. Please upload a .pdf or .docx file.")
+    # Collapse whitespace and limit length
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:8000]
+
+
 def fetch_article_text(url):
     """Fetch and extract readable text from an article URL."""
     try:
@@ -205,23 +243,61 @@ INTRO_OUTRO = {
             "Until next time — stay steady."
         ),
         "rules": (
-            "THE CALM EDGE — MANDATORY EPISODE RULES:\n"
-            "- Identity: Every episode must reinforce composure under pressure, strategic "
-            "thinking over emotional reaction, psychological depth, executive restraint, "
-            "and deliberate action.\n"
+            "THE CALM EDGE — WENDY SCRIPT REPLICATION FRAMEWORK (MANDATORY):\n\n"
+            "CORE PRINCIPLE: ElevenLabs follows structure, rhythm, and language constraints — "
+            "not instructions like 'be calm'. You do not add calmness. You remove volatility.\n\n"
+            "OUTCOME TARGETS (NON-NEGOTIABLE): Every script must prevent emotional escalation, "
+            "force natural pauses, use neutral vocabulary, control sentence length, and create rhythm. "
+            "If any fail, tone breaks.\n\n"
+            "RULE 1 — SENTENCE ARCHITECTURE (THE BIG ONE):\n"
+            "- Max 12-16 words per sentence. One idea per sentence.\n"
+            "- Break complex ideas into multiple lines. Avoid long flowing paragraphs.\n"
+            "- Short sentences restrict emotional variation; ElevenLabs delivers them with control.\n\n"
+            "RULE 2 — CONTROLLED USE OF PAUSES:\n"
+            "- Allowed markers: [pause], [measured breath], [soft emphasis]\n"
+            "- Place after a key question, before a key insight, after a strong statement, "
+            "every 5-7 lines (max).\n"
+            "- Do NOT overuse. Do NOT stack pauses. One pause = control. Many pauses = performance.\n\n"
+            "RULE 3 — EMOTIONALLY NEUTRAL VOCABULARY:\n"
+            "- Replace emotional words: overwhelming → destabilising, exciting → significant, "
+            "frustrating → constraining, powerful → consequential.\n"
+            "- Filter: 'Does this word increase emotional intensity?' If yes, replace it.\n"
+            "- ElevenLabs amplifies emotional words. Neutral language enforces calm authority.\n\n"
+            "RULE 4 — CADENCE ENGINEERING (INVISIBLE CONTROL):\n"
+            "- Use Stacked Cadence: 'You've built your reputation on precision. On consistency. On reliability.'\n"
+            "- Use Step-Down Logic: 'Your role has changed. Your visibility has increased. "
+            "Your environment has expanded.'\n"
+            "- Creates natural pacing, reinforces authority, prevents rushed delivery.\n\n"
+            "RULE 5 — NO EMOTIONAL INSTRUCTIONS:\n"
+            "- NEVER use: [laughs], [excited], [sighs], [surprised]\n"
+            "- ONLY use: [pause], [measured breath], [soft emphasis]\n"
+            "- Emotional tags trigger performance mode. Wendy must remain composed.\n\n"
+            "EPISODE STRUCTURE (USE THIS FOR EVERY EPISODE):\n"
+            "1. THE SITUATION — Describe a real professional scenario. Keep sentences short. "
+            "Ground it in reality. Introduce one key tension. [pause]\n"
+            "2. THE PATTERN — Explain what is happening psychologically. Use neutral language. "
+            "Break ideas into lines. Avoid emotional framing. [pause]\n"
+            "3. THE REFRAME — Shift perspective. 'What is actually happening?' Use cadence blocks: "
+            "'Not this. But this.' [measured breath]\n"
+            "4. THE CALM MOVE — Provide ONE action only. Frame it: 'The Calm Move is simple.' "
+            "Then: Define, Apply, Reinforce. [pause]\n"
+            "5. CLOSING REFLECTION — Short. Controlled. Thoughtful. No motivation.\n\n"
+            "IDENTITY RULES:\n"
+            "- Every episode must reinforce composure under pressure, strategic thinking over "
+            "emotional reaction, psychological depth, executive restraint, and deliberate action.\n"
             "- AVOID: motivation tone, therapy tone, productivity culture, hustle language, "
             "inspirational energy. Never use: crush it, level up, dominate, hack, explosive growth.\n"
             "- ENCOURAGE language: composure, deliberate, strategic, positioning, signal, "
             "leverage, controlled response.\n"
-            "- Episode structure: The Situation → The Psychological Pattern → "
-            "The Strategic Reframe → The Calm Move (one action only).\n"
             "- Tone: Measured, analytical, slightly detached, emotionally regulated. "
             "Never excited, aggressive, casual, or hype-driven.\n"
             "- The Wendy Performance Coach app is mentioned ONLY in the intro and outro. "
             "Never mid-episode. Never urgently.\n"
             "- Episode length: 8-14 minutes. No filler.\n"
             "- Each episode must answer: What is truly happening psychologically?\n"
-            "- Final test: Does the episode leave the listener more composed? If not, revise."
+            "- FINAL QUALITY CHECK: Are sentences short and controlled? Are pauses intentional "
+            "and limited? Is vocabulary emotionally neutral? Does cadence feel structured? "
+            "Does it sound like thinking — not performing? If not, revise."
         ),
     },
     "Think, Expand, Grow, Thrive": {
@@ -241,18 +317,23 @@ INTRO_OUTRO = {
 }
 
 
-def generate_script(article_urls, podcast_brand, api_key):
-    """Generate a podcast script from selected article URLs."""
+def generate_script(selected_articles, podcast_brand, api_key):
+    """Generate a podcast script from selected articles (news URLs or uploaded docs)."""
     client = OpenAI(api_key=api_key)
 
     # Fetch actual article content so ChatGPT doesn't have to guess
     article_contents = []
-    for url in article_urls:
-        text = fetch_article_text(url)
-        if text:
-            article_contents.append(f"SOURCE ({url}):\n{text}")
-        else:
-            article_contents.append(f"SOURCE ({url}):\n[Could not fetch content]")
+    for article in selected_articles:
+        # Uploaded documents already have extracted text
+        if article.get("_doc_text"):
+            article_contents.append(f"SOURCE ({article['title']}):\n{article['_doc_text']}")
+        elif article.get("url"):
+            url = article["url"]
+            text = fetch_article_text(url)
+            if text:
+                article_contents.append(f"SOURCE ({url}):\n{text}")
+            else:
+                article_contents.append(f"SOURCE ({url}):\n[Could not fetch content]")
 
     all_articles = "\n\n---\n\n".join(article_contents)
 
@@ -386,6 +467,7 @@ def generate_podcast_audio(script_text, voice, title, podcast_brand,
         final_mp3 = episode_dir / f"{safe_title}.mp3"
         generate_audio_elevenlabs(
             script_text, voice, elevenlabs_key, final_mp3,
+            podcast_brand=podcast_brand,
         )
 
         if progress_callback:
@@ -483,6 +565,38 @@ def main():
             except Exception as e:
                 st.error(f"News search failed: {e}")
 
+    st.divider()
+    st.subheader("Or upload a document")
+    uploaded_docs = st.file_uploader(
+        "Upload Word or PDF files as source material",
+        type=["pdf", "docx"],
+        accept_multiple_files=True,
+        key="doc_uploader",
+    )
+    if uploaded_docs:
+        doc_articles = []
+        for doc in uploaded_docs:
+            try:
+                text = extract_document_text(doc)
+                doc_articles.append({
+                    "title": doc.name,
+                    "description": text[:200] + "..." if len(text) > 200 else text,
+                    "url": None,
+                    "source": {"name": "Uploaded document"},
+                    "_doc_text": text,
+                })
+            except Exception as e:
+                st.error(f"Failed to read {doc.name}: {e}")
+        if doc_articles:
+            existing = st.session_state.get("articles", [])
+            # Merge: keep existing news articles, add new doc articles (avoid duplicates by title)
+            existing_titles = {a["title"] for a in existing}
+            for da in doc_articles:
+                if da["title"] not in existing_titles:
+                    existing.append(da)
+            st.session_state["articles"] = existing
+            st.success(f"Added {len(doc_articles)} document(s) as source material.")
+
     # --- Step 2: Display Stories (optional) ---
     selected = []
     if st.session_state.get("articles"):
@@ -494,10 +608,15 @@ def main():
                 f"**{article['title']}**",
                 key=f"article_{i}",
             )
-            st.caption(f"{article.get('description', 'No description')}  \n"
-                       f"[Read article]({article['url']}) — {article.get('source', {}).get('name', 'Unknown')}")
+            source_name = article.get('source', {}).get('name', 'Unknown')
+            if article.get('url'):
+                st.caption(f"{article.get('description', 'No description')}  \n"
+                           f"[Read article]({article['url']}) — {source_name}")
+            else:
+                st.caption(f"{article.get('description', 'No description')}  \n"
+                           f"Source: {source_name}")
             if checked:
-                selected.append(article["url"])
+                selected.append(article)
 
         st.session_state["selected_urls"] = selected
 
@@ -512,7 +631,11 @@ def main():
         is_openai_tts = tts_engine.startswith("OpenAI")
 
         if is_elevenlabs:
-            voice_label = st.selectbox("TTS Voice", ELEVENLABS_VOICE_LABELS)
+            # Show brand-specific voices first when available
+            brand_voices = BRAND_VOICE_LABELS.get(podcast_brand, [])
+            other_voices = [v for v in ELEVENLABS_VOICE_LABELS if v not in brand_voices]
+            voice_options = brand_voices + other_voices
+            voice_label = st.selectbox("TTS Voice", voice_options)
             voice = voice_label.split(" — ")[0]
         elif is_openai_tts:
             voice = st.selectbox("TTS Voice", OPENAI_VOICES,
@@ -535,15 +658,23 @@ def main():
                     from elevenlabs import VoiceSettings
                     el_client = ELClient(api_key=keys["ELEVENLABS_API_KEY"])
                     voice_id = ELEVENLABS_VOICES.get(voice, voice)
+                    # Use Wendy framework ElevenLabs settings for The Calm Edge
+                    if podcast_brand == "The Calm Edge":
+                        el_voice_settings = VoiceSettings(
+                            stability=0.75, similarity_boost=0.80,
+                            style=0.05, speed=1.0,
+                        )
+                    else:
+                        el_voice_settings = VoiceSettings(
+                            stability=0.72, similarity_boost=0.85,
+                            style=0.0, speed=1.0,
+                        )
                     audio_gen = el_client.text_to_speech.convert(
                         text=preview_text,
                         voice_id=voice_id,
                         model_id="eleven_turbo_v2_5",
                         output_format="mp3_44100_128",
-                        voice_settings=VoiceSettings(
-                            stability=0.72, similarity_boost=0.85,
-                            style=0.0, speed=1.0,
-                        ),
+                        voice_settings=el_voice_settings,
                     )
                     audio_bytes = b"".join(audio_gen)
                     st.audio(audio_bytes, format="audio/mp3")
@@ -589,8 +720,8 @@ def main():
 
     # Default episode title from selected article, or empty
     default_title = ""
-    if selected and st.session_state.get("articles"):
-        default_title = st.session_state["articles"][0]["title"]
+    if selected:
+        default_title = selected[0]["title"]
     episode_title = st.text_input("Episode Title", value=default_title)
 
     st.session_state["podcast_brand"] = podcast_brand

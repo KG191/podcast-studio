@@ -60,6 +60,10 @@ ELEVENLABS_VOICES = {
     "Josh": "TxGEqnHWrfWFTfGW9XjX",       # Deep American male
     "Domi": "AZnzlk1XvdvUeBnXmlld",       # Strong American female
     "Elli": "MF3mGyEYCl7XYWbV9V6O",       # Young American female
+    "Liberty X": "iBo5PWT1qLiEyqhM7TrG",  # The Calm Edge voice
+    "Beth": "8N2ng9i2uiUWqstgmWlH",       # The Calm Edge voice
+    "Emma": "56bWURjYFHyYyVf490Dp",       # The Calm Edge voice
+    "Serena": "RGb96Dcl0k5eVje8EBch",     # The Calm Edge voice
 }
 
 # --- OpenAI TTS (short clips <5 min) ---
@@ -386,7 +390,7 @@ def generate_chunk_audio_openai(text, voice_name, chunk_index, total_chunks,
 
 
 def generate_audio_elevenlabs(text, voice_name, api_key, output_mp3,
-                              max_retries=3):
+                              max_retries=3, podcast_brand=None):
     """
     Generate audio using ElevenLabs TTS.
 
@@ -405,13 +409,24 @@ def generate_audio_elevenlabs(text, voice_name, api_key, output_mp3,
     # Resolve voice name to ID
     voice_id = ELEVENLABS_VOICES.get(voice_name, voice_name)
 
-    voice_settings = VoiceSettings(
-        stability=0.72,           # High consistency — steady podcast narration
-        similarity_boost=0.85,    # Close to original voice
-        style=0.0,                # Neutral — no exaggerated expression
-        use_speaker_boost=True,   # Enhanced clarity
-        speed=1.0,                # Normal pace
-    )
+    # The Calm Edge: Wendy Script Replication Framework ElevenLabs settings
+    # Stability: 70-80, Clarity: 75-85, Style Exaggeration: 0-10 (LOW)
+    if podcast_brand == "The Calm Edge":
+        voice_settings = VoiceSettings(
+            stability=0.75,           # Wendy framework: 70-80 range
+            similarity_boost=0.80,    # Wendy framework: 75-85 (clarity)
+            style=0.05,              # Wendy framework: 0-10 (LOW) — controlled authority
+            use_speaker_boost=True,
+            speed=1.0,
+        )
+    else:
+        voice_settings = VoiceSettings(
+            stability=0.72,           # High consistency — steady podcast narration
+            similarity_boost=0.85,    # Close to original voice
+            style=0.0,                # Neutral — no exaggerated expression
+            use_speaker_boost=True,   # Enhanced clarity
+            speed=1.0,                # Normal pace
+        )
 
     char_count = len(text)
     word_count = len(text.split())
