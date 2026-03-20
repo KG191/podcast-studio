@@ -383,6 +383,37 @@ def generate_script(selected_articles, podcast_brand, api_key):
     return response.choices[0].message.content
 
 
+def transform_script_for_calm_edge(script_text, api_key):
+    """Rewrite an existing script to conform to the Wendy Script Replication Framework."""
+    client = OpenAI(api_key=api_key)
+
+    brand_data = INTRO_OUTRO["The Calm Edge"]
+    rules = brand_data["rules"]
+    intro_text = brand_data["intro"]
+    outro_text = brand_data["outro"]
+
+    prompt = (
+        f"You are a script editor for The Calm Edge podcast. Your task is to REWRITE "
+        f"the script below so it strictly conforms to the Wendy Script Replication Framework.\n\n"
+        f"STRICT RULES:\n"
+        f"- Output ONLY the rewritten script. No preamble, no commentary, no notes.\n"
+        f"- Preserve the original meaning, arguments, and content — but transform the "
+        f"language, structure, rhythm, and tone to match the framework exactly.\n"
+        f"- The rewritten script must begin with this exact intro:\n\"{intro_text}\"\n"
+        f"- The rewritten script must end with this exact outro:\n\"{outro_text}\"\n"
+        f"- Aim for approximately 1200-2100 words (8-14 minutes at speaking pace).\n\n"
+        f"{rules}\n\n"
+        f"ORIGINAL SCRIPT TO REWRITE:\n\n{script_text}"
+    )
+
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return response.choices[0].message.content
+
+
 # ---------------------------------------------------------------------------
 # Cover Image Generation (OpenAI DALL-E 3)
 # ---------------------------------------------------------------------------
@@ -748,7 +779,17 @@ def main():
             "Or upload a script (.txt)", type=["txt"], key="script_uploader"
         )
         if uploaded_script is not None:
-            st.session_state["script"] = uploaded_script.read().decode("utf-8")
+            raw_script = uploaded_script.read().decode("utf-8")
+            if podcast_brand == "The Calm Edge":
+                with st.spinner("Transforming script to match Wendy Script Replication Framework..."):
+                    try:
+                        raw_script = transform_script_for_calm_edge(
+                            raw_script, keys["OPENAI_API_KEY"]
+                        )
+                        st.success("Script transformed to The Calm Edge framework.")
+                    except Exception as e:
+                        st.error(f"Framework transformation failed: {e}")
+            st.session_state["script"] = raw_script
 
     if "script" in st.session_state:
         script = st.text_area(
@@ -760,6 +801,20 @@ def main():
         st.session_state["script"] = script
         word_count = len(script.split())
         st.caption(f"{word_count} words — ~{word_count / 150:.0f} min at normal pace")
+
+        # Manual transform button for The Calm Edge
+        if podcast_brand == "The Calm Edge":
+            if st.button("🔄 Transform Script to Calm Edge Framework"):
+                with st.spinner("Rewriting script to match Wendy Script Replication Framework..."):
+                    try:
+                        transformed = transform_script_for_calm_edge(
+                            script, keys["OPENAI_API_KEY"]
+                        )
+                        st.session_state["script"] = transformed
+                        st.success("Script transformed. Review the changes above.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Framework transformation failed: {e}")
 
         # Download button
         st.download_button(
