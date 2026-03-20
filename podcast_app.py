@@ -159,8 +159,13 @@ def search_news(query, api_key, max_results=3):
 # ---------------------------------------------------------------------------
 
 
-def extract_document_text(uploaded_file):
-    """Extract text from an uploaded Word (.docx) or PDF file."""
+def extract_document_text(uploaded_file, max_length=8000):
+    """Extract text from an uploaded Word (.docx) or PDF file.
+
+    Args:
+        uploaded_file: Streamlit UploadedFile object.
+        max_length: Max characters to return. Use 0 for no limit.
+    """
     name = uploaded_file.name.lower()
     if name.endswith(".pdf"):
         try:
@@ -180,7 +185,9 @@ def extract_document_text(uploaded_file):
         raise ValueError(f"Unsupported file type: {name}. Please upload a .pdf or .docx file.")
     # Collapse whitespace and limit length
     text = re.sub(r'\s+', ' ', text).strip()
-    return text[:8000]
+    if max_length:
+        text = text[:max_length]
+    return text
 
 
 def fetch_article_text(url):
@@ -776,20 +783,25 @@ def main():
             st.caption("Search and select stories above, or upload/paste a script.")
     with script_col2:
         uploaded_script = st.file_uploader(
-            "Or upload a script (.txt)", type=["txt"], key="script_uploader"
+            "Or upload a script (.pdf, .docx)", type=["pdf", "docx"], key="script_uploader"
         )
         if uploaded_script is not None:
-            raw_script = uploaded_script.read().decode("utf-8")
-            if podcast_brand == "The Calm Edge":
-                with st.spinner("Transforming script to match Wendy Script Replication Framework..."):
-                    try:
-                        raw_script = transform_script_for_calm_edge(
-                            raw_script, keys["OPENAI_API_KEY"]
-                        )
-                        st.success("Script transformed to The Calm Edge framework.")
-                    except Exception as e:
-                        st.error(f"Framework transformation failed: {e}")
-            st.session_state["script"] = raw_script
+            try:
+                raw_script = extract_document_text(uploaded_script, max_length=0)
+            except Exception as e:
+                st.error(f"Failed to read {uploaded_script.name}: {e}")
+                raw_script = None
+            if raw_script:
+                if podcast_brand == "The Calm Edge":
+                    with st.spinner("Transforming script to match Wendy Script Replication Framework..."):
+                        try:
+                            raw_script = transform_script_for_calm_edge(
+                                raw_script, keys["OPENAI_API_KEY"]
+                            )
+                            st.success("Script transformed to The Calm Edge framework.")
+                        except Exception as e:
+                            st.error(f"Framework transformation failed: {e}")
+                st.session_state["script"] = raw_script
 
     if "script" in st.session_state:
         script = st.text_area(
