@@ -114,8 +114,53 @@ def load_keys():
 
 
 # ---------------------------------------------------------------------------
-# News Search (GNews API)
+# News Search (GNews API + Google News RSS)
 # ---------------------------------------------------------------------------
+
+NEWS_SOURCES = [
+    "Google News (Free, no API key)",
+    "GNews API (requires API key)",
+]
+
+
+def search_news_google_rss(query, max_results=5):
+    """Search Google News via RSS feed. Free, no API key required.
+
+    Returns list of article dicts in the same format as search_news().
+    """
+    import xml.etree.ElementTree as ET
+    from urllib.parse import quote
+
+    encoded_query = quote(query)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en&gl=US&ceid=US:en"
+
+    resp = requests.get(rss_url, timeout=15)
+    resp.raise_for_status()
+
+    root = ET.fromstring(resp.content)
+    articles = []
+
+    for item in root.findall(".//item"):
+        if len(articles) >= max_results:
+            break
+
+        title = item.findtext("title", "")
+        link = item.findtext("link", "")
+        description = item.findtext("description", "")
+        source_el = item.find("source")
+        source_name = source_el.text if source_el is not None else "Google News"
+
+        # Strip HTML tags from description
+        description = re.sub(r'<[^>]+>', '', description).strip()
+
+        articles.append({
+            "title": title,
+            "description": description[:300] if description else "No description",
+            "url": link,
+            "source": {"name": source_name},
+        })
+
+    return articles
 
 
 def search_news(query, api_key, max_results=3):
@@ -609,16 +654,13 @@ def main():
 
     # Load API keys
     keys = load_keys()
-    missing = []
-    if not keys.get("GNEWS_API_KEY"):
-        missing.append("GNEWS_API_KEY")
     if not keys.get("OPENAI_API_KEY"):
-        missing.append("OPENAI_API_KEY")
-
-    if missing:
-        st.error(f"Missing API key(s) in config.env: {', '.join(missing)}")
-        st.info("Add them to config.env in the project folder, then refresh.")
+        st.error("Missing OPENAI_API_KEY in config.env")
+        st.info("Add it to config.env in the project folder, then refresh.")
         st.stop()
+
+    if not keys.get("GNEWS_API_KEY"):
+        st.info("GNEWS_API_KEY not set — GNews search unavailable. Google News RSS is available.")
 
     if not keys.get("ELEVENLABS_API_KEY"):
         st.warning("ELEVENLABS_API_KEY not found in config.env — ElevenLabs TTS will be unavailable. "
@@ -628,19 +670,30 @@ def main():
 
     # --- Step 1: Search News ---
     st.header("1. Find Stories")
+    # Build available sources list based on configured keys
+    available_sources = ["Google News (Free, no API key)"]
+    if keys.get("GNEWS_API_KEY"):
+        available_sources.append("GNews API (requires API key)")
+
     with st.form("search_form"):
-        col1, col2 = st.columns([1, 3])
+        col1, col2, col3 = st.columns([1, 2, 1])
         with col1:
             category = st.selectbox("Category", CATEGORIES)
         with col2:
             custom_query = st.text_input("Or enter a custom search query")
+        with col3:
+            news_source = st.selectbox("News Source", available_sources)
         search_clicked = st.form_submit_button("🔍 Search News")
 
     if search_clicked:
         query = custom_query.strip() if custom_query.strip() else category
-        with st.spinner(f"Searching for: **{query}**"):
+        use_gnews = news_source.startswith("GNews")
+        with st.spinner(f"Searching {news_source.split(' (')[0]} for: **{query}**"):
             try:
-                articles = search_news(query, keys["GNEWS_API_KEY"])
+                if use_gnews:
+                    articles = search_news(query, keys["GNEWS_API_KEY"])
+                else:
+                    articles = search_news_google_rss(query)
                 st.session_state["articles"] = articles
                 st.session_state["search_query"] = query
                 if not articles:
