@@ -478,6 +478,51 @@ def generate_cover_images(title, podcast_brand, api_key, script_text="", count=3
     return images
 
 
+MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def save_cover_image(img, path):
+    """Save a cover image ensuring the file is under 5 MB.
+
+    Tries PNG first. If too large, falls back to JPEG with decreasing
+    quality until the file fits under the limit.
+    """
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    if buf.tell() <= MAX_COVER_BYTES:
+        Path(path).write_bytes(buf.getvalue())
+        return
+
+    # PNG too large — switch to JPEG
+    rgb_img = img.convert("RGB") if img.mode != "RGB" else img
+    for quality in (95, 85, 75, 65):
+        buf = io.BytesIO()
+        rgb_img.save(buf, format="JPEG", quality=quality, optimize=True)
+        if buf.tell() <= MAX_COVER_BYTES:
+            # Write as .jpg alongside the expected path
+            jpeg_path = Path(path).with_suffix(".jpg")
+            jpeg_path.write_bytes(buf.getvalue())
+            return
+
+    # Last resort — reduce resolution until it fits
+    for scale in (2400, 2000, 1500):
+        resized = rgb_img.resize((scale, scale), Image.LANCZOS)
+        buf = io.BytesIO()
+        resized.save(buf, format="JPEG", quality=80, optimize=True)
+        if buf.tell() <= MAX_COVER_BYTES:
+            jpeg_path = Path(path).with_suffix(".jpg")
+            jpeg_path.write_bytes(buf.getvalue())
+            return
+
+
+def _find_cover_file(episode_dir):
+    """Return the cover filename that was actually saved (cover.png or cover.jpg)."""
+    for ext in ("png", "jpg"):
+        if (Path(episode_dir) / f"cover.{ext}").exists():
+            return f"cover.{ext}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # TTS Pipeline (wraps podcast_audio.py functions)
 # ---------------------------------------------------------------------------
@@ -906,7 +951,7 @@ def main():
                 cover_idx = st.session_state.get("selected_cover", 0)
                 cover_img = st.session_state["cover_images"][cover_idx]
                 cover_path = episode_dir / "cover.png"
-                cover_img.save(str(cover_path), "PNG")
+                save_cover_image(cover_img, cover_path)
 
             # Generate audio
             progress_text = ("Generating full episode audio..." if is_elevenlabs
@@ -943,7 +988,7 @@ def main():
                     "voice": sel_voice,
                     "duration": f"{minutes}:{seconds:02d}",
                     "mp3_file": mp3_path.name,
-                    "cover_file": "cover.png" if "cover_images" in st.session_state else None,
+                    "cover_file": _find_cover_file(episode_dir) if "cover_images" in st.session_state else None,
                     "created": datetime.now().isoformat(),
                 }
                 with open(episode_dir / "metadata.json", "w") as f:
@@ -956,7 +1001,7 @@ def main():
                 **Duration**: {minutes}:{seconds:02d}
                 **Files saved to**: `{episode_dir}`
                 - `{mp3_path.name}` — upload to RSS.com
-                - `cover.png` — upload as episode artwork
+                - `{_find_cover_file(episode_dir) or 'cover.png'}` — upload as episode artwork
                 - `script.txt` — episode script
                 """)
 
